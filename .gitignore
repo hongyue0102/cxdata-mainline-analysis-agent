@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 密钥文件（用户本地填写，不提交）
+skills/*/scripts/.env
+
+# 中间数据
+skills/mainline-analysis/scripts/data/
+
+# 生成的报告
+A股主线识别*.md
+
+# macOS
+.DS_Store

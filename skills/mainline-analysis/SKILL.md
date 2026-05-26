@@ -1,0 +1,83 @@
+---
+name: mainline-analysis
+description: A股市场主线识别系统。自动拉取指数行情、行业涨跌、个股行情、舆情等数据，经结构化分析后生成六段式主线识别报告。触发词：今日主线、市场主线、主线识别、主线分析、每日主线。
+---
+
+# 执行标准程序 (Recommended Workflow)
+
+当用户要求分析市场主线时，按以下步骤执行：
+
+## Step 1: 数据获取
+
+运行数据获取脚本：
+
+```bash
+cd {Agent目录}/skills/mainline-analysis/scripts && python3 fetch_data.py {日期}
+```
+
+> `{Agent目录}` 为本 Agent 解压后的根目录路径。
+
+日期格式 YYYY-MM-DD，不传则默认最近一个交易日。脚本会自动拉取全部所需数据到 `scripts/data/` 目录（约 2 分钟）。
+
+## Step 2: 数据分析
+
+```bash
+cd {Agent目录}/skills/mainline-analysis/scripts && python3 analyze_data.py {日期}
+```
+
+生成结构化分析结果 `scripts/data/analysis.json`。
+
+## Step 3: 你（Agent LLM）必须亲自生成报告
+
+**重要：generate_report.py 只是输出结构化的 prompt 文本，不调用任何外部 LLM API。你必须读取 analysis.json 的数据，按照六段式模板自行生成 Markdown 报告。**
+
+### 你需要完成的分析：
+
+1. **市场环境**：三大指数行情表格 + 环境判断 + AI结论
+2. **当前主线**：核心主线（综合得分第1）+ 第二主线（综合得分第2），区分资金攻击型/趋势防御型
+3. **次级热点**：1个次级方向（优先选资金攻击型）
+4. **核心锚点个股**：5-8只（仅从涨停股中选取，排除新股）
+5. **情绪周期**：阶段名称 + 一句话定性
+6. **一句话AI结论**：核心操作建议
+
+### 综合评分公式（v3.1）
+
+综合得分 = 日涨幅排名分(30%) + 涨停集中度得分(30%) + 周涨幅趋势分(20%) + 月涨幅趋势分(20%)
+
+---
+
+# 配置说明
+
+## 数据源
+本技能已内置 4 个数据源 skill，无需额外安装：
+
+| Skill | 用途 |
+|-------|------|
+| stock-market-information | 行情、行业涨跌、情绪温度、异动、市值 |
+| stock-basic-information | 个股申万行业分类 |
+| public-opinion-stock-index | 正面/负面舆情指数与标题 |
+| index-market-date | 三大指数日线行情 |
+
+配置文件位于各 skill 的 `scripts/.env`，需填写：
+- `CXDA_USER_KEY`：财新数据平台用户密钥
+  - 前往 [财新数据平台](https://yun.ccxe.com.cn/data/Skills) 注册并申请（**平台目前处于推广期，可免费试用**）
+- `BASE_URL`：API 基础地址（默认 `http://cxapi.ccxe.com.cn/cxda`）
+
+---
+
+# 故障排除
+
+- **数据源未配置**: 检查各 skill 的 `scripts/.env` 中是否配置了 `CXDA_USER_KEY`。如无密钥，前往 [财新数据平台](https://yun.ccxe.com.cn/data/Skills) 申请（推广期可免费试用）
+- **ModuleNotFoundError**: 需要安装依赖 → `pip install python-dotenv`
+- **数据获取失败**: 检查各 skill 的 `scripts/.env` 配置，确认网络连接正常
+
+---
+
+# 输出结构（六段式）
+
+1. **市场环境** — 指数强弱、涨跌家数、成交额变化、情绪判断
+2. **当前主线** — 核心主线 + 第二主线，区分资金攻击型/趋势防御型
+3. **次级热点** — 1个次级方向
+4. **核心锚点个股** — 5-8只，标注情绪标的/趋势中军/补涨标的
+5. **当前情绪** — 冰点/调整/修复/主升/高潮
+6. **一句话交易结论** — 核心操作建议

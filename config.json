@@ -1,0 +1,9 @@
+{
+  "name": "mainline-analysis-agent",
+  "version": "1.0.0",
+  "author": "caixindata",
+  "description": "A股市场主线识别专家分身",
+  "primary_model": "claude-sonnet-4",
+  "tags": ["A股", "主线识别", "市场结构", "情绪周期", "涨停分析"],
+  "category": "金融分析"
+}
