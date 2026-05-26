@@ -2,7 +2,7 @@
 
 ## 基础信息
 
-name: mainline-analysis-agent
+name: cxdata-mainline-analysis-agent
 version: 1.0.0
 author: caixindata
 description: A股市场结构研究员分身，自动拉取市场数据、识别主线方向、判断情绪周期、生成六段式交易报告。用户只需说"今日主线"即可获得完整的市场分析报告。

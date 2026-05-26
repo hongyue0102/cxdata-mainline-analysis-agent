@@ -360,16 +360,44 @@ def analyze_emotion_cycle(meta, stock_top_rise, abnormal_trade, market_heat):
     up_ratio = safe_float(h.get("UP_NUM_PER"))
 
     # === 1. 广度维度（40%）===
-    if limit_up >= 90 and limit_down <= 10 and up_ratio >= 65:
-        breadth_score = 4
-    elif limit_up >= 70 and limit_down <= 15 and up_ratio >= 55:
-        breadth_score = 3
-    elif limit_up >= 40 and limit_down <= 25 and up_ratio >= 50:
-        breadth_score = 2
-    elif limit_up >= 20:
-        breadth_score = 1
+    # 改为加权计分：涨停数、跌停数、上涨占比分别评分后取均值
+    # 涨停数量评分（权重40%）
+    if limit_up >= 120:
+        lu_score = 4
+    elif limit_up >= 80:
+        lu_score = 3
+    elif limit_up >= 40:
+        lu_score = 2
+    elif limit_up >= 15:
+        lu_score = 1
     else:
-        breadth_score = 0
+        lu_score = 0
+
+    # 跌停数量评分（权重30%，跌停越少分越高）
+    if limit_down <= 5:
+        ld_score = 4
+    elif limit_down <= 15:
+        ld_score = 3
+    elif limit_down <= 30:
+        ld_score = 2
+    elif limit_down <= 50:
+        ld_score = 1
+    else:
+        ld_score = 0
+
+    # 上涨占比评分（权重30%）
+    if up_ratio >= 70:
+        ur_score = 4
+    elif up_ratio >= 55:
+        ur_score = 3
+    elif up_ratio >= 45:
+        ur_score = 2
+    elif up_ratio >= 35:
+        ur_score = 1
+    else:
+        ur_score = 0
+
+    breadth_score = round(lu_score * 0.4 + ld_score * 0.3 + ur_score * 0.3)
 
     # === 2. 强度维度（35%）===
     broken = 0
@@ -384,13 +412,16 @@ def analyze_emotion_cycle(meta, stock_top_rise, abnormal_trade, market_heat):
     total_limit_up = broken + sealed
     broken_rate = round(broken / total_limit_up * 100, 1) if total_limit_up > 0 else 0
 
-    if broken_rate <= 15:
+    # 改为综合封板数量和炸板率：封板绝对数量也很重要，不能只看比率
+    if total_limit_up == 0:
+        strength_score = 0
+    elif sealed >= 80 and broken_rate <= 25:
         strength_score = 4
-    elif broken_rate <= 25:
+    elif sealed >= 50 and broken_rate <= 40:
         strength_score = 3
-    elif broken_rate <= 40:
+    elif sealed >= 25:
         strength_score = 2
-    elif broken_rate <= 55:
+    elif sealed >= 10:
         strength_score = 1
     else:
         strength_score = 0

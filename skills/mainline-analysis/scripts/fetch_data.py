@@ -11,6 +11,7 @@ A股主线识别 - 数据获取脚本
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -26,19 +27,37 @@ SKILLS = {
     "index": _SKILLS_ROOT / "index-market-date/scripts/api_query.py",
 }
 
+# 统一配置文件路径（只需配一份密钥）
+_UNIFIED_ENV = Path(__file__).resolve().parent / ".env"
+
 _DATA_SOURCE_INSTALL_HINT = (
     "内置数据源 skill 不完整！请确认 skills/ 目录下包含以下目录：\n"
     "  - stock-market-information\n"
     "  - stock-basic-information\n"
     "  - public-opinion-stock-index\n"
     "  - index-market-date\n"
-    "各 skill 的 scripts/.env 中需配置 CXDA_USER_KEY。\n"
     "密钥申请地址: https://yun.ccxe.com.cn/data/Skills （平台推广期，可免费试用）"
 )
 
 
+def _load_unified_env():
+    """加载统一的 .env 配置文件，将 CXDA_USER_KEY 和 BASE_URL 写入环境变量，
+    这样所有 skill 的 api_query.py 都能通过 os.environ 拿到密钥，无需各自配置。"""
+    if _UNIFIED_ENV.exists():
+        with open(_UNIFIED_ENV, encoding="utf-8") as f:
+            for line in f:
+                if '=' in line and not line.strip().startswith('#'):
+                    k, v = line.strip().split('=', 1)
+                    k, v = k.strip(), v.strip()
+                    if k and not os.environ.get(k):
+                        os.environ[k] = v
+
+
 def _check_data_sources():
     """检查所有取数 skill 是否已安装，未安装则打印缺失列表并退出"""
+    # 加载统一配置到环境变量
+    _load_unified_env()
+
     missing = []
     for name, path in SKILLS.items():
         if not path.exists():
@@ -49,13 +68,27 @@ def _check_data_sources():
             print(m)
         print(f"\n{_DATA_SOURCE_INSTALL_HINT}")
         sys.exit(1)
-    # 检查 .env 配置是否存在（任一 skill 的 .env 即可，共用同一 key）
-    env_file = _SKILLS_ROOT / "stock-market-information/scripts/.env"
-    if not env_file.exists():
-        print(f"错误：API 配置文件不存在: {env_file}")
-        print(f"请参考 skill 文档配置 CXDA_USER_KEY 和 BASE_URL")
-        print(f"\n{_DATA_SOURCE_INSTALL_HINT}")
-        sys.exit(1)
+    # 检查密钥是否已配置（环境变量或统一 .env）
+    if not os.environ.get('CXDA_USER_KEY'):
+        print("未配置 CXDA_USER_KEY，首次使用需要设置密钥。")
+        print("前往 https://yun.ccxe.com.cn/data/Skills 申请（推广期可免费试用）")
+        print()
+        try:
+            user_key = input("请输入你的 CXDA_USER_KEY: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n已取消。请手动创建 scripts/.env 并填入密钥。")
+            sys.exit(1)
+        if not user_key:
+            print("未输入密钥，退出。")
+            sys.exit(1)
+        # 自动写入 .env
+        with open(_UNIFIED_ENV, "w", encoding="utf-8") as f:
+            f.write(f"BASE_URL=http://cxapi.ccxe.com.cn/cxda\n")
+            f.write(f"CXDA_USER_KEY={user_key}\n")
+        os.environ["CXDA_USER_KEY"] = user_key
+        os.environ["BASE_URL"] = os.environ.get("BASE_URL", "http://cxapi.ccxe.com.cn/cxda")
+        print(f"✓ 密钥已保存到 {_UNIFIED_ENV}，下次无需再配")
+        print()
 
 # 申万2021一级行业列表
 SW_L1_INDUSTRIES = [

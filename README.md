@@ -23,19 +23,16 @@ Agent 会自动：拉取数据 → 结构化分析 → AI 生成报告
 ## 前置依赖
 
 1. 安装 Python 依赖：`pip install python-dotenv`
-2. 配置数据源密钥：
+2. 配置数据源密钥（**只需配一份**）：
+   - 复制 `skills/mainline-analysis/scripts/.env.example` 为 `skills/mainline-analysis/scripts/.env`
    - 前往 [财新数据平台](https://yun.ccxe.com.cn/data/Skills) 注册并申请 `CXDA_USER_KEY`（**平台目前处于推广期，可免费试用**）
-   - 将密钥填入以下 4 个 skill 的 `scripts/.env` 中的 `CXDA_USER_KEY` 字段：
-     - `skills/stock-market-information/scripts/.env`
-     - `skills/stock-basic-information/scripts/.env`
-     - `skills/public-opinion-stock-index/scripts/.env`
-     - `skills/index-market-date/scripts/.env`
+   - 将密钥填入 `.env` 中的 `CXDA_USER_KEY` 字段
    - 数据源 Skill 已内置在 Agent 中，无需额外下载
 
 ## 目录结构
 
 ```
-mainline-analysis-agent/
+cxdata-mainline-analysis-agent/
 ├── AGENT.md                          # Agent 整体人设与执行逻辑
 ├── SOUL.md                           # 身份、性格、能力边界
 ├── rules.md                          # 硬性规则
