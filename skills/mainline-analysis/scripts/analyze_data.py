@@ -122,6 +122,40 @@ def safe_float(val, default=0.0):
         return default
 
 
+def _get_board(code):
+    """根据股票代码返回板块: bse(北交所) / gem(创业板) / star(科创板) / main(主板)"""
+    if not code:
+        return "main"
+    prefix = code[:2]
+    if prefix in ("83", "87", "88", "92"):
+        return "bse"
+    elif prefix == "30":
+        return "gem"
+    elif prefix == "68":
+        return "star"
+    else:
+        return "main"
+
+
+def _get_limit_threshold(code, name):
+    """根据板块和ST标识返回涨跌停板阈值(%)"""
+    board = _get_board(code)
+    is_st = "ST" in (name or "")
+    if board == "bse":
+        return 30
+    elif board in ("gem", "star"):
+        return 20
+    else:
+        return 5 if is_st else 10
+
+
+def is_limit_up(r):
+    """判断是否涨停"""
+    pct = safe_float(r.get("PRICE_LIMIT", 0))
+    threshold = _get_limit_threshold(r.get("STK_CODE", ""), r.get("STK_SHORT_NAME", ""))
+    return pct >= threshold * 0.99
+
+
 def analyze_market_environment(heat, industry_quotes, meta):
     """第一步：判断市场整体环境"""
     h = heat[0] if heat else {}
@@ -186,8 +220,7 @@ def analyze_main_lines(industry_l2_quotes, stock_top_rise, abnormal_trade, stock
     bottom_industries = industry_l2_quotes[-3:] if len(industry_l2_quotes) >= 3 else []
 
     # 涨停股按板块归类
-    limit_up_stocks = [s for s in stock_top_rise
-                       if safe_float(s.get("PRICE_LIMIT")) >= 9.9]
+    limit_up_stocks = [s for s in stock_top_rise if is_limit_up(s)]
 
     # 从异动数据提取活跃方向
     active_directions = {}
@@ -277,8 +310,8 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
                           main_line_names=None, stock_detail=None):
     """第三步：识别龙头、中军、补涨 — 只从核心主线和第二主线的涨停股中选"""
     limit_ups = [s for s in stock_top_rise
-                 if safe_float(s.get("PRICE_LIMIT")) >= 9.9
-                 and safe_float(s.get("PRICE_LIMIT")) < 100]
+                 if is_limit_up(s) and safe_float(s.get("PRICE_LIMIT")) < 100
+                 and "ST" not in (s.get("STK_SHORT_NAME") or "")]
 
     # 如果有主线行业名，只保留属于主线行业的涨停股
     if main_line_names and stock_detail:
@@ -316,7 +349,7 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
 
         if total_val > 500e8:
             role = "趋势中军"
-        elif rise >= 19.9:
+        elif _get_board(code) in ("gem", "star", "bse"):
             role = "情绪标的（20cm）"
         else:
             role = "情绪标的" if amount > 10e8 else "补涨标的"
@@ -351,10 +384,10 @@ def analyze_emotion_cycle(meta, stock_top_rise, abnormal_trade, market_heat):
     limit_up = meta.get("limit_up_count", 0)
     limit_down = meta.get("limit_down_count", 0)
 
-    # 涨停股列表（排除新股）
+    # 涨停股列表（排除新股和ST股）
     limit_ups = [s for s in stock_top_rise
-                 if safe_float(s.get("PRICE_LIMIT")) >= 9.9
-                 and safe_float(s.get("PRICE_LIMIT")) < 100]
+                 if is_limit_up(s) and safe_float(s.get("PRICE_LIMIT")) < 100
+                 and "ST" not in (s.get("STK_SHORT_NAME") or "")]
 
     h = market_heat[0] if market_heat else {}
     up_ratio = safe_float(h.get("UP_NUM_PER"))

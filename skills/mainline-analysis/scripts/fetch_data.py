@@ -10,39 +10,66 @@ A股主线识别 - 数据获取脚本
 输出目录：data/
 """
 
+import base64
+import gzip
 import json
 import os
-import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional, Dict
 
-# 内置数据源 skill 路径（从 mainline-analysis/scripts/ 上溯到 skills/ 目录）
-_SKILLS_ROOT = Path(__file__).resolve().parent.parent.parent
-SKILLS = {
-    "market": _SKILLS_ROOT / "stock-market-information/scripts/api_query.py",
-    "basic": _SKILLS_ROOT / "stock-basic-information/scripts/api_query.py",
-    "opinion": _SKILLS_ROOT / "public-opinion-stock-index/scripts/api_query.py",
-    "index": _SKILLS_ROOT / "index-market-date/scripts/api_query.py",
-}
+import requests
 
 # 统一配置文件路径（只需配一份密钥）
 _UNIFIED_ENV = Path(__file__).resolve().parent / ".env"
+_TOKEN_VALID_SECONDS = 60
+_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 _DATA_SOURCE_INSTALL_HINT = (
-    "内置数据源 skill 不完整！请确认 skills/ 目录下包含以下目录：\n"
-    "  - stock-market-information\n"
-    "  - stock-basic-information\n"
-    "  - public-opinion-stock-index\n"
-    "  - index-market-date\n"
     "密钥申请地址: https://yun.ccxe.com.cn/data/Skills （平台推广期，可免费试用）"
 )
 
 
-def _load_unified_env():
-    """加载统一的 .env 配置文件，将 CXDA_USER_KEY 和 BASE_URL 写入环境变量，
-    这样所有 skill 的 api_query.py 都能通过 os.environ 拿到密钥，无需各自配置。"""
+def _load_env() -> Dict[str, str]:
+    env = {}
+    if _UNIFIED_ENV.exists():
+        for line in _UNIFIED_ENV.read_text(encoding='utf-8').splitlines():
+            if '=' in line and not line.strip().startswith('#'):
+                k, v = line.split('=', 1)
+                env[k.strip()] = v.strip()
+    return env
+
+
+def _save_env(env: Dict[str, str]):
+    lines = []
+    if _UNIFIED_ENV.exists():
+        for line in _UNIFIED_ENV.read_text(encoding='utf-8').splitlines():
+            if not any(line.strip().startswith(k) for k in ['AUTH_TOKEN', '# === Token']):
+                lines.append(line)
+    lines.extend([
+        '',
+        '# === Token缓存（自动管理，请勿手动修改）===',
+        f'AUTH_TOKEN={env.get("AUTH_TOKEN", "")}',
+        f'AUTH_TOKEN_EXPIRE={env.get("AUTH_TOKEN_EXPIRE", "")}',
+    ])
+    _UNIFIED_ENV.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def _load_config():
+    """加载配置，优先环境变量，再 .env 文件"""
+    _load_env_to_os()
+    config = _load_env()
+    return {
+        "base_url": os.environ.get('BASE_URL', '').rstrip('/') or config.get('BASE_URL', '').rstrip('/'),
+        "user_key": os.environ.get('CXDA_USER_KEY') or config.get('CXDA_USER_KEY'),
+    }
+
+
+def _load_env_to_os():
+    """将 .env 配置加载到环境变量"""
     if _UNIFIED_ENV.exists():
         with open(_UNIFIED_ENV, encoding="utf-8") as f:
             for line in f:
@@ -53,23 +80,36 @@ def _load_unified_env():
                         os.environ[k] = v
 
 
-def _check_data_sources():
-    """检查所有取数 skill 是否已安装，未安装则打印缺失列表并退出"""
-    # 加载统一配置到环境变量
-    _load_unified_env()
+def _get_token(base_url: str, user_key: str) -> Optional[str]:
+    """获取有效 token（优先缓存，过期自动刷新）"""
+    env = _load_env()
+    cached_token = env.get('AUTH_TOKEN')
+    try:
+        expire = datetime.strptime(env.get('AUTH_TOKEN_EXPIRE', ''), '%Y-%m-%d %H:%M:%S')
+        if cached_token and expire > datetime.now():
+            return cached_token
+    except (ValueError, TypeError):
+        pass
 
-    missing = []
-    for name, path in SKILLS.items():
-        if not path.exists():
-            missing.append(f"  - {name}: {path}")
-    if missing:
-        print("错误：以下取数 skill 未找到：")
-        for m in missing:
-            print(m)
-        print(f"\n{_DATA_SOURCE_INSTALL_HINT}")
-        sys.exit(1)
-    # 检查密钥是否已配置（环境变量或统一 .env）
-    if not os.environ.get('CXDA_USER_KEY'):
+    resp = requests.get(
+        f"{base_url}/webservice/foreign_getAuthtoken.htm",
+        params={"userKey": user_key},
+        headers=_HEADERS,
+    )
+    token = json.loads(resp.text).get("result")
+    if token:
+        env.update({
+            'AUTH_TOKEN': token,
+            'AUTH_TOKEN_EXPIRE': (datetime.now() + timedelta(seconds=_TOKEN_VALID_SECONDS)).strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        _save_env(env)
+    return token
+
+
+def _check_config():
+    """检查密钥是否已配置"""
+    config = _load_config()
+    if not config["base_url"] or not config["user_key"]:
         print("未配置 CXDA_USER_KEY，首次使用需要设置密钥。")
         print("前往 https://yun.ccxe.com.cn/data/Skills 申请（推广期可免费试用）")
         print()
@@ -81,97 +121,74 @@ def _check_data_sources():
         if not user_key:
             print("未输入密钥，退出。")
             sys.exit(1)
-        # 自动写入 .env
         with open(_UNIFIED_ENV, "w", encoding="utf-8") as f:
-            f.write(f"BASE_URL=http://cxapi.ccxe.com.cn/cxda\n")
+            f.write("BASE_URL=http://cxapi.ccxe.com.cn/cxda\n")
             f.write(f"CXDA_USER_KEY={user_key}\n")
         os.environ["CXDA_USER_KEY"] = user_key
         os.environ["BASE_URL"] = os.environ.get("BASE_URL", "http://cxapi.ccxe.com.cn/cxda")
         print(f"✓ 密钥已保存到 {_UNIFIED_ENV}，下次无需再配")
         print()
 
-# 申万2021一级行业列表
-SW_L1_INDUSTRIES = [
-    "美容护理", "石油石化", "电子", "钢铁", "纺织服饰", "食品饮料", "公用事业",
-    "计算机", "轻工制造", "通信", "煤炭", "汽车", "家用电器", "有色金属",
-    "医药生物", "银行", "建筑材料", "电力设备", "环保", "非银金融", "商贸零售",
-    "基础化工", "机械设备", "国防军工", "交通运输", "房地产", "社会服务",
-    "传媒", "农林牧渔", "综合", "建筑装饰",
-]
 
-# 申万2021二级行业列表
-SW_L2_INDUSTRIES = [
-    "半导体", "光学光电", "消费电子", "元件", "电子化学品", "其他电子",
-    "计算机设备", "IT服务", "软件开发", "计算机应用",
-    "通信设备", "通信服务",
-    "游戏", "影视院线", "数字媒体", "社交", "出版", "广告营销",
-    "化学制药", "中药", "生物制品", "医药商业", "医疗器械", "医疗服务",
-    "电池", "光伏设备", "风电设备", "电网设备",
-    "通用设备", "专用设备", "仪器仪表", "自动化设备", "金属制品",
-    "航空装备", "航天装备", "军工电子",
-    "乘用车", "商用车", "汽车零部件", "摩托车及其他",
-    "工业金属", "贵金属", "能源金属", "金属新材料",
-    "化学制品", "塑料", "橡胶", "农化制品", "非金属材料", "化学原料",
-    "火力发电", "水力发电", "光伏发电", "风力发电", "其他发电", "燃气", "环保",
-    "煤炭开采", "焦炭",
-    "油气开采", "炼化及贸易", "油服工程",
-    "国有大型银行", "股份制银行", "城商行",
-    "证券", "保险", "多元金融",
-    "房地产开发", "房地产服务",
-    "房屋建设", "装修装饰", "基建市政", "专业工程",
-    "水泥", "玻璃玻纤", "装修建材",
-    "普钢", "特钢",
-    "种植业", "渔业", "饲料", "养殖", "农产品加工",
-    "白酒", "非白酒", "饮料乳品", "零食", "调味品",
-    "白色家电", "黑色家电", "小家电",
-    "纺织制造", "服装家纺", "饰品",
-    "造纸", "家居", "包装印刷", "文娱用品",
-    "一般零售", "专业连锁", "贸易", "互联网电商",
-    "酒店餐饮", "旅游及景区", "教育", "专业服务",
-    "铁路公路", "航空机场", "航运港口", "物流",
-    "个护用品", "化妆品", "医疗美容",
-    "综合",
-    "环境治理", "环保设备", "水务",
-]
+# ========== 业务接口（硬编码，只允许以下接口） ==========
+
+_ALLOWED_APIS = frozenset([
+    "getDIndDayQuoByCond-G",
+    "getStkHotMarketByCond-G",
+    "getInduDayQuoByCond-G",
+    "getStkDayQuoByCond-G",
+    "getStatTradeDateMainByCond-G",
+    "getDStkValueMidByCond-G",
+    "getDPubComInfo1ByCond-G",
+    "getIndexLyricalList2ByCond-G",
+    "getIndexLyricalList1ByCond-G",
+    "getDStkBlockTradeByCond-G",
+])
 
 
-def safe_float(val, default=0.0):
-    if val in (None, "", "NaN"):
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-
-def safe_int(val, default=0):
-    return int(safe_float(val, default))
-
-
-def call_api(skill_key: str, api_id: str, params: dict) -> dict:
-    script = SKILLS[skill_key]
-    args = [sys.executable, str(script), api_id]
-    for k, v in params.items():
-        args.append(f"{k}={v}")
-    result = subprocess.run(args, capture_output=True, text=True, cwd=str(script.parent))
-    if result.returncode != 0:
-        print(f"  [ERROR] {api_id}: {result.stderr.strip()}")
+def call_api(api_id: str, params: dict) -> dict:
+    """直接发 HTTP 请求调用 API（仅允许 _ALLOWED_APIS 中的接口）"""
+    if api_id not in _ALLOWED_APIS:
+        print(f"  [ERROR] 不允许的接口: {api_id}")
         return {"code": "error", "result": [], "totalCount": 0}
+
+    config = _load_config()
+    base_url = config["base_url"]
+    user_key = config["user_key"]
+
+    if not base_url or not user_key:
+        print("  [ERROR] 未配置 BASE_URL 或 CXDA_USER_KEY")
+        return {"code": "error", "result": [], "totalCount": 0}
+
     try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        print(f"  [ERROR] {api_id}: JSON解析失败")
+        token = _get_token(base_url, user_key)
+        if not token:
+            print("  [ERROR] 获取 authToken 失败")
+            return {"code": "error", "result": [], "totalCount": 0}
+
+        request_params = {"authtoken": token}
+        request_params.update(params)
+
+        resp = requests.get(
+            f"{base_url}/webservice/cxdata/{api_id}.htm",
+            params=request_params,
+            headers=_HEADERS,
+        )
+        data = json.loads(gzip.decompress(base64.b64decode(resp.text.strip())).decode('utf-8'))
+        return data
+    except Exception as e:
+        print(f"  [ERROR] {api_id}: {e}")
         return {"code": "error", "result": [], "totalCount": 0}
 
 
-def fetch_all_pages(skill_key: str, api_id: str, params: dict, show_progress: bool = False) -> list:
+def fetch_all_pages(api_id: str, params: dict, show_progress: bool = False) -> list:
     """自动分页拉取全部数据（每页10000条）。"""
     all_results = []
     page = 1
     total = None
     while True:
         params_copy = {**params, "pageNum": str(page), "pageSize": "10000"}
-        data = call_api(skill_key, api_id, params_copy)
+        data = call_api(api_id, params_copy)
         results = data.get("result", [])
         if not results:
             break
@@ -191,11 +208,64 @@ def fetch_all_pages(skill_key: str, api_id: str, params: dict, show_progress: bo
     return all_results
 
 
+# ========== 辅助函数 ==========
+
+def safe_float(val, default=0.0):
+    if val in (None, "", "NaN"):
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_int(val, default=0):
+    return int(safe_float(val, default))
+
+
+def _get_board(code):
+    if not code:
+        return "main"
+    prefix = code[:2]
+    if prefix in ("83", "87", "88", "92"):
+        return "bse"
+    elif prefix == "30":
+        return "gem"
+    elif prefix == "68":
+        return "star"
+    else:
+        return "main"
+
+
+def _get_limit_threshold(code, name):
+    board = _get_board(code)
+    is_st = "ST" in (name or "")
+    if board == "bse":
+        return 30
+    elif board in ("gem", "star"):
+        return 20
+    else:
+        return 5 if is_st else 10
+
+
+def is_limit_up(r):
+    pct = safe_float(r.get("PRICE_LIMIT", 0))
+    threshold = _get_limit_threshold(r.get("STK_CODE", ""), r.get("STK_SHORT_NAME", ""))
+    return pct >= threshold * 0.99
+
+
+def is_limit_down(r):
+    pct = safe_float(r.get("PRICE_LIMIT", 0))
+    threshold = _get_limit_threshold(r.get("STK_CODE", ""), r.get("STK_SHORT_NAME", ""))
+    return pct <= -threshold * 0.99
+
+
+# ========== 主流程 ==========
+
 def main():
     if len(sys.argv) > 1:
         date = sys.argv[1]
     else:
-        from datetime import datetime, timedelta
         today = datetime.now()
         if today.weekday() == 5:
             today -= timedelta(days=1)
@@ -205,8 +275,7 @@ def main():
 
     t_start = time.time()
 
-    # 前置检查：取数 skill 是否已安装
-    _check_data_sources()
+    _check_config()
 
     print(f"=== A股主线识别数据获取 ===")
     print(f"目标日期: {date}")
@@ -226,7 +295,7 @@ def main():
     INDEX_NAMES = ["上证指数", "深证成指", "创业板指"]
     index_quotes = []
     for idx_name in INDEX_NAMES:
-        data = call_api("index", "getDIndDayQuoByCond-G",
+        data = call_api("getDIndDayQuoByCond-G",
                         {"indShortName": idx_name, "tradeDate": date, "pageNum": "1", "pageSize": "1"})
         results = data.get("result", [])
         if results:
@@ -237,7 +306,7 @@ def main():
     # 1/8 市场情绪温度
     # ========================================
     print("\n[1/8] 市场情绪温度...")
-    heat = fetch_all_pages("market", "getStkHotMarketByCond-G", {"endDate": date})
+    heat = fetch_all_pages("getStkHotMarketByCond-G", {"endDate": date})
     save("market_heat.json", heat)
 
     # ========================================
@@ -249,7 +318,7 @@ def main():
         all_results = []
         page = 1
         while True:
-            data = call_api("market", "getInduDayQuoByCond-G",
+            data = call_api("getInduDayQuoByCond-G",
                             {"induLevel": level, "pageNum": str(page), "pageSize": "200"})
             results = data.get("result", [])
             if not results:
@@ -265,6 +334,8 @@ def main():
                 and r.get("WEIGH_TYPE_PAR") == "流通市值加权"]
 
     industry_quotes = fetch_industry_by_level("1")
+    if not industry_quotes:
+        print("  [ERROR] 一级行业数据为空，API 调用可能失败，后续分析结果不可靠")
     industry_quotes.sort(key=lambda x: float(x.get("INDU_LIMIT_DAY", 0) or 0), reverse=True)
     save("industry_quotes.json", industry_quotes)
     print(f"  [OK] industry_quotes.json ({len(industry_quotes)} 条)")
@@ -275,6 +346,8 @@ def main():
     print("[2b/8] 申万二级行业涨跌幅（induLevel=2 批量拉取）...")
 
     industry_l2_quotes = fetch_industry_by_level("2")
+    if not industry_l2_quotes:
+        print("  [ERROR] 二级行业数据为空，API 调用可能失败，后续分析结果不可靠")
     industry_l2_quotes.sort(key=lambda x: float(x.get("INDU_LIMIT_DAY", 0) or 0), reverse=True)
     save("industry_l2_quotes.json", industry_l2_quotes)
     print(f"  [OK] industry_l2_quotes.json ({len(industry_l2_quotes)} 条)")
@@ -283,29 +356,26 @@ def main():
     # 3/8 全市场个股日线行情（分页拉取全部）
     # ========================================
     print("[3/8] 全市场个股日线行情...")
-    all_quotes = fetch_all_pages("market", "getStkDayQuoByCond-G", {"tradeDate": date}, show_progress=True)
+    all_quotes = fetch_all_pages("getStkDayQuoByCond-G", {"tradeDate": date}, show_progress=True)
+    if not all_quotes:
+        print("  [ERROR] 个股行情数据为空，API 调用可能失败，后续分析结果不可靠")
     valid_quotes = [r for r in all_quotes if r.get("PRICE_LIMIT") not in (None, "", "NaN")]
     valid_quotes.sort(key=lambda x: float(x.get("PRICE_LIMIT", 0)), reverse=True)
 
     save("stock_top_rise.json", valid_quotes[:100])
     save("stock_top_drop.json", valid_quotes[-50:] if len(valid_quotes) > 100 else [])
 
-    limit_up_10 = [r for r in valid_quotes if 9.9 <= float(r.get("PRICE_LIMIT", 0)) < 19.9]
-    limit_up_20 = [r for r in valid_quotes if float(r.get("PRICE_LIMIT", 0)) >= 19.9]
-    limit_down_10 = [r for r in valid_quotes if -19.9 < float(r.get("PRICE_LIMIT", 0)) <= -9.9]
-    limit_down_20 = [r for r in valid_quotes if float(r.get("PRICE_LIMIT", 0)) <= -19.9]
-
-    all_limit_up = limit_up_10 + limit_up_20
-    all_limit_down = limit_down_10 + limit_down_20
+    all_limit_up = [r for r in valid_quotes if is_limit_up(r)]
+    all_limit_down = [r for r in valid_quotes if is_limit_down(r)]
     print(f"  总成交: {len(valid_quotes)}家")
-    print(f"  涨停: {len(all_limit_up)}家 (10%:{len(limit_up_10)}, 20%:{len(limit_up_20)})")
-    print(f"  跌停: {len(all_limit_down)}家 (10%:{len(limit_down_10)}, 20%:{len(limit_down_20)})")
+    print(f"  涨停: {len(all_limit_up)}家")
+    print(f"  跌停: {len(all_limit_down)}家")
 
     # ========================================
     # 4/8 异动披露
     # ========================================
     print("[4/8] 异动披露...")
-    abnormal = fetch_all_pages("market", "getStatTradeDateMainByCond-G", {"endDate": date})
+    abnormal = fetch_all_pages("getStatTradeDateMainByCond-G", {"endDate": date})
     save("abnormal_trade.json", abnormal)
 
     # ========================================
@@ -314,13 +384,13 @@ def main():
     print("[5/8] 涨停股市值...")
 
     def query_stock_value(r):
-        val = call_api("market", "getDStkValueMidByCond-G",
+        val = call_api("getDStkValueMidByCond-G",
                        {"stkCode": r["STK_CODE"], "endDate": date, "pageNum": "1", "pageSize": "1"})
         return val.get("result", [])
 
     stock_value = []
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = [pool.submit(query_stock_value, r) for r in all_limit_up[:30]]
+        futures = [pool.submit(query_stock_value, r) for r in all_limit_up]
         for f in as_completed(futures):
             stock_value.extend(f.result())
     save("stock_value.json", stock_value)
@@ -333,16 +403,13 @@ def main():
     def query_stock_detail(r):
         code = r.get("STK_CODE", "")
         name = r.get("STK_SHORT_NAME", "")
-        # 行业分类
-        ind_data = call_api("basic", "getDPubComInfo1ByCond-G",
+        ind_data = call_api("getDPubComInfo1ByCond-G",
                             {"stkCode": code, "pageNum": "1", "pageSize": "1"})
         ind_res = ind_data.get("result", [{}])
         info = ind_res[0] if ind_res else {}
-        # 正面舆情
-        pos_data = call_api("opinion", "getIndexLyricalList2ByCond-G",
+        pos_data = call_api("getIndexLyricalList2ByCond-G",
                             {"code": code, "indexDate": date, "pageNum": "1", "pageSize": "5"})
-        # 负面舆情
-        neg_data = call_api("opinion", "getIndexLyricalList1ByCond-G",
+        neg_data = call_api("getIndexLyricalList1ByCond-G",
                             {"code": code, "indexDate": date, "pageNum": "1", "pageSize": "5"})
 
         pos_results = pos_data.get("result", [])
@@ -371,13 +438,16 @@ def main():
         futures = [pool.submit(query_stock_detail, r) for r in all_limit_up]
         for f in as_completed(futures):
             stock_detail.append(f.result())
+    no_industry = sum(1 for d in stock_detail if not d.get("sw_industry_s") and not d.get("sw_industry_q"))
+    if no_industry > 0 and len(all_limit_up) > 0:
+        print(f"  [WARN] {no_industry}/{len(all_limit_up)} 只涨停股行业分类为空，行业分类 skill 可能配置异常")
     save("stock_detail.json", stock_detail)
 
     # ========================================
     # 7/8 大宗交易
     # ========================================
     print("[7/8] 大宗交易...")
-    block = fetch_all_pages("market", "getDStkBlockTradeByCond-G", {"tradeDate": date})
+    block = fetch_all_pages("getDStkBlockTradeByCond-G", {"tradeDate": date})
     save("block_trade.json", block)
 
     # 元数据
