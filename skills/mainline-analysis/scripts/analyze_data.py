@@ -205,12 +205,36 @@ def analyze_market_environment(heat, industry_quotes, meta):
     }
 
 
-def _match_l2_from_industry_name(sw_name):
-    """从申万三级行业/证监会行业名匹配到二级行业"""
+def _match_l2_from_industry_name(sw_name, l2_standard_names=None):
+    """从申万三级行业/证监会行业名匹配到二级行业。
+
+    若提供 l2_standard_names（L2 行业标准名集合），会优先返回能精确匹配
+    标准名的 L2 名（处理"白酒Ⅲ"→"白酒Ⅱ"、"元件"→"元件" 等带后缀变体）；
+    匹配不到时回退到关键词表的默认映射。
+    """
     if not sw_name:
         return None
+
+    # 1) 先尝试精确匹配 L2 标准名（去掉 Ⅱ/Ⅲ/Ⅳ 等罗马数字后缀后做包含匹配）
+    if l2_standard_names:
+        import re
+        # 去掉末尾的罗马数字后缀（Ⅱ、Ⅲ、Ⅳ 等）后做"包含"匹配
+        sw_clean = re.sub(r'[ⅡⅢⅣⅤⅠ]+$', '', sw_name).strip()
+        for std_name in l2_standard_names:
+            std_clean = re.sub(r'[ⅡⅢⅣⅤⅠ]+$', '', std_name).strip()
+            if std_clean and (std_clean == sw_clean or std_clean in sw_name or sw_clean in std_name):
+                return std_name
+
+    # 2) 回退到关键词表
     for keyword, l2_name in SW_L3_TO_L2_KEYWORDS.items():
         if keyword in sw_name:
+            # 若关键词表返回值能匹配到标准名（带后缀），用标准名
+            if l2_standard_names:
+                for std_name in l2_standard_names:
+                    import re
+                    std_clean = re.sub(r'[ⅡⅢⅣⅤⅠ]+$', '', std_name).strip()
+                    if std_clean == l2_name:
+                        return std_name
             return l2_name
     return None
 
@@ -240,13 +264,19 @@ def analyze_main_lines(industry_l2_quotes, stock_top_rise, abnormal_trade, stock
     if stock_detail:
         detail_map = {r.get("code", ""): r for r in stock_detail}
 
+    # L2 标准行业名清单（用于精确匹配）
+    l2_standard_names = [ind.get("INDU_CLASS_NAME", "") for ind in industry_l2_quotes
+                         if ind.get("INDU_CLASS_NAME")]
+    l2_standard_set = set(l2_standard_names)
+
     l2_limit_count = {}
     for s in limit_up_stocks:
         code = s.get("STK_CODE", "")
         info = detail_map.get(code, {})
         sw_s = info.get("sw_industry_s", "")
         sw_q = info.get("sw_industry_q", "")
-        matched = _match_l2_from_industry_name(sw_s) or _match_l2_from_industry_name(sw_q)
+        matched = (_match_l2_from_industry_name(sw_s, l2_standard_set)
+                   or _match_l2_from_industry_name(sw_q, l2_standard_set))
         if matched:
             l2_limit_count[matched] = l2_limit_count.get(matched, 0) + 1
 
@@ -307,7 +337,7 @@ def analyze_main_lines(industry_l2_quotes, stock_top_rise, abnormal_trade, stock
 
 
 def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
-                          main_line_names=None, stock_detail=None):
+                          main_line_names=None, stock_detail=None, l2_standard_names=None):
     """第三步：识别龙头、中军、补涨 — 只从核心主线和第二主线的涨停股中选"""
     limit_ups = [s for s in stock_top_rise
                  if is_limit_up(s) and safe_float(s.get("PRICE_LIMIT")) < 100
@@ -323,7 +353,8 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
             info = detail_map.get(code, {})
             sw_s = info.get("sw_industry_s", "")
             sw_q = info.get("sw_industry_q", "")
-            matched = _match_l2_from_industry_name(sw_s) or _match_l2_from_industry_name(sw_q)
+            matched = (_match_l2_from_industry_name(sw_s, l2_standard_names)
+                       or _match_l2_from_industry_name(sw_q, l2_standard_names))
             if matched and matched in main_line_set:
                 filtered.append(s)
         # 主线涨停股不足5只时回退到全市场
@@ -340,12 +371,21 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
 
     # 构建所有涨停股信息
     all_info = []
+    detail_map = {r.get("code", ""): r for r in (stock_detail or [])}
     for s in limit_ups:
         code = s.get("STK_CODE", "")
         rise = safe_float(s.get("PRICE_LIMIT"))
         amount = safe_float(s.get("TRADE_AMUT"))
         val = value_map.get(code, {})
         total_val = val.get("total_value", 0)
+
+        # 解析个股的 L2 行业归属
+        info = detail_map.get(code, {})
+        sw_s = info.get("sw_industry_s", "")
+        sw_q = info.get("sw_industry_q", "")
+        industry = (_match_l2_from_industry_name(sw_s, l2_standard_names)
+                    or _match_l2_from_industry_name(sw_q, l2_standard_names)
+                    or sw_s or "未知")
 
         if total_val > 500e8:
             role = "趋势中军"
@@ -361,6 +401,7 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
             "amount": amount,
             "total_value": total_val,
             "role": role,
+            "industry": industry,
         })
 
     all_info.sort(key=lambda x: x["amount"], reverse=True)
@@ -587,8 +628,12 @@ def main():
 
     print("[3/6] 核心锚点...")
     main_line_names = [m["name"] for m in lines["main_lines"]]
+    # 传递 L2 标准名清单给锚点分析，确保行业匹配跟主线识别一致
+    l2_std_set = set(ind.get("INDU_CLASS_NAME", "") for ind in (industry_l2_quotes or industry_quotes)
+                     if ind.get("INDU_CLASS_NAME"))
     anchors = analyze_anchor_stocks(stock_top_rise, stock_value, meta.get("limit_up_count", 0),
-                                    main_line_names=main_line_names, stock_detail=stock_detail)
+                                    main_line_names=main_line_names, stock_detail=stock_detail,
+                                    l2_standard_names=l2_std_set)
 
     print("[4/6] 情绪周期...")
     emotion = analyze_emotion_cycle(meta, stock_top_rise, abnormal_trade, heat)

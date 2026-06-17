@@ -8,127 +8,23 @@ A股主线识别 - 数据获取脚本
     示例: python fetch_data.py 2026-04-20
 
 输出目录：data/
+
+鉴权说明：
+    本脚本通过 subprocess 调用同目录下的 query.py（cxdata 官方统一查询工具）。
+    认证状态由 query.py 自动管理（读取 ~/.cxda-cache/.shared/cxda_auth.json）。
+    若未认证，query.py 会返回错误，需先由 Agent 引导用户完成 auth.py 鉴权流程。
 """
 
-import base64
-import gzip
 import json
-import os
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict
 
-import requests
-
-# 统一配置文件路径（只需配一份密钥）
-_UNIFIED_ENV = Path(__file__).resolve().parent / ".env"
-_TOKEN_VALID_SECONDS = 60
-_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-_DATA_SOURCE_INSTALL_HINT = (
-    "密钥申请地址: https://yun.ccxe.com.cn/data/Skills （平台推广期，可免费试用）"
-)
-
-
-def _load_env() -> Dict[str, str]:
-    env = {}
-    if _UNIFIED_ENV.exists():
-        for line in _UNIFIED_ENV.read_text(encoding='utf-8').splitlines():
-            if '=' in line and not line.strip().startswith('#'):
-                k, v = line.split('=', 1)
-                env[k.strip()] = v.strip()
-    return env
-
-
-def _save_env(env: Dict[str, str]):
-    lines = []
-    if _UNIFIED_ENV.exists():
-        for line in _UNIFIED_ENV.read_text(encoding='utf-8').splitlines():
-            if not any(line.strip().startswith(k) for k in ['AUTH_TOKEN', '# === Token']):
-                lines.append(line)
-    lines.extend([
-        '',
-        '# === Token缓存（自动管理，请勿手动修改）===',
-        f'AUTH_TOKEN={env.get("AUTH_TOKEN", "")}',
-        f'AUTH_TOKEN_EXPIRE={env.get("AUTH_TOKEN_EXPIRE", "")}',
-    ])
-    _UNIFIED_ENV.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-
-
-def _load_config():
-    """加载配置，优先环境变量，再 .env 文件"""
-    _load_env_to_os()
-    config = _load_env()
-    return {
-        "base_url": os.environ.get('BASE_URL', '').rstrip('/') or config.get('BASE_URL', '').rstrip('/'),
-        "user_key": os.environ.get('CXDA_USER_KEY') or config.get('CXDA_USER_KEY'),
-    }
-
-
-def _load_env_to_os():
-    """将 .env 配置加载到环境变量"""
-    if _UNIFIED_ENV.exists():
-        with open(_UNIFIED_ENV, encoding="utf-8") as f:
-            for line in f:
-                if '=' in line and not line.strip().startswith('#'):
-                    k, v = line.strip().split('=', 1)
-                    k, v = k.strip(), v.strip()
-                    if k and not os.environ.get(k):
-                        os.environ[k] = v
-
-
-def _get_token(base_url: str, user_key: str) -> Optional[str]:
-    """获取有效 token（优先缓存，过期自动刷新）"""
-    env = _load_env()
-    cached_token = env.get('AUTH_TOKEN')
-    try:
-        expire = datetime.strptime(env.get('AUTH_TOKEN_EXPIRE', ''), '%Y-%m-%d %H:%M:%S')
-        if cached_token and expire > datetime.now():
-            return cached_token
-    except (ValueError, TypeError):
-        pass
-
-    resp = requests.get(
-        f"{base_url}/webservice/foreign_getAuthtoken.htm",
-        params={"userKey": user_key},
-        headers=_HEADERS,
-    )
-    token = json.loads(resp.text).get("result")
-    if token:
-        env.update({
-            'AUTH_TOKEN': token,
-            'AUTH_TOKEN_EXPIRE': (datetime.now() + timedelta(seconds=_TOKEN_VALID_SECONDS)).strftime('%Y-%m-%d %H:%M:%S'),
-        })
-        _save_env(env)
-    return token
-
-
-def _check_config():
-    """检查密钥是否已配置"""
-    config = _load_config()
-    if not config["base_url"] or not config["user_key"]:
-        print("未配置 CXDA_USER_KEY，首次使用需要设置密钥。")
-        print("前往 https://yun.ccxe.com.cn/data/Skills 申请（推广期可免费试用）")
-        print()
-        try:
-            user_key = input("请输入你的 CXDA_USER_KEY: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n已取消。请手动创建 scripts/.env 并填入密钥。")
-            sys.exit(1)
-        if not user_key:
-            print("未输入密钥，退出。")
-            sys.exit(1)
-        with open(_UNIFIED_ENV, "w", encoding="utf-8") as f:
-            f.write("BASE_URL=http://cxapi.ccxe.com.cn/cxda\n")
-            f.write(f"CXDA_USER_KEY={user_key}\n")
-        os.environ["CXDA_USER_KEY"] = user_key
-        os.environ["BASE_URL"] = os.environ.get("BASE_URL", "http://cxapi.ccxe.com.cn/cxda")
-        print(f"✓ 密钥已保存到 {_UNIFIED_ENV}，下次无需再配")
-        print()
-
+SCRIPT_DIR = Path(__file__).resolve().parent
+_QUERY_SCRIPT = SCRIPT_DIR / "query.py"
 
 # ========== 业务接口（硬编码，只允许以下接口） ==========
 
@@ -146,36 +42,69 @@ _ALLOWED_APIS = frozenset([
 ])
 
 
+def _run_query(api_id: str, params: dict) -> dict:
+    """单次 subprocess 调用 query.py api。返回解析后的 dict（含原始 status 字段）。"""
+    cmd = [sys.executable, str(_QUERY_SCRIPT), "api", api_id]
+    for k, v in params.items():
+        cmd.append(f"{k}={v}")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(SCRIPT_DIR),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"query.py 退出码 {result.returncode}, stderr: {result.stderr[:200]}")
+    stdout = result.stdout.strip()
+    if not stdout:
+        raise RuntimeError("query.py 无输出")
+    return json.loads(stdout)
+
+
+def _session_confirm():
+    """调用 query.py session confirm，解除 50 次限制阻断。"""
+    cmd = [sys.executable, str(_QUERY_SCRIPT), "session", "confirm"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(SCRIPT_DIR))
+    if result.returncode != 0:
+        raise RuntimeError(f"session confirm 失败: {result.stderr[:200]}")
+
+
 def call_api(api_id: str, params: dict) -> dict:
-    """直接发 HTTP 请求调用 API（仅允许 _ALLOWED_APIS 中的接口）"""
+    """通过 query.py 调用业务接口（仅允许 _ALLOWED_APIS 中的接口）。
+
+    query.py 内部处理：认证、token 缓存、gzip+base64 解码、积分计数、50 次限制。
+    触发 50 次限制时自动调 session confirm 解除阻断并重试一次（批量取数场景）。
+    返回的 dict 与原 HTTP 直连版本兼容：含 code/result/totalCount 等字段。
+    """
     if api_id not in _ALLOWED_APIS:
         print(f"  [ERROR] 不允许的接口: {api_id}")
         return {"code": "error", "result": [], "totalCount": 0}
 
-    config = _load_config()
-    base_url = config["base_url"]
-    user_key = config["user_key"]
-
-    if not base_url or not user_key:
-        print("  [ERROR] 未配置 BASE_URL 或 CXDA_USER_KEY")
-        return {"code": "error", "result": [], "totalCount": 0}
-
     try:
-        token = _get_token(base_url, user_key)
-        if not token:
-            print("  [ERROR] 获取 authToken 失败")
-            return {"code": "error", "result": [], "totalCount": 0}
+        data = _run_query(api_id, params)
 
-        request_params = {"authtoken": token}
-        request_params.update(params)
+        # 50 次限制触发：自动 confirm 后重试一次
+        if data.get("status") == "confirmation_required":
+            print(f"  [AUTO-CONFIRM] {api_id}: 触发 50 次限制，自动 confirm 后重试")
+            _session_confirm()
+            data = _run_query(api_id, params)
 
-        resp = requests.get(
-            f"{base_url}/webservice/cxdata/{api_id}.htm",
-            params=request_params,
-            headers=_HEADERS,
-        )
-        data = json.loads(gzip.decompress(base64.b64decode(resp.text.strip())).decode('utf-8'))
+        # 认证失败不重试
+        if data.get("status") in ("failed", "terms_not_accepted"):
+            msg = data.get("error", "未知错误")
+            print(f"  [ERROR] {api_id}: {msg}")
+            return {"code": "error", "result": [], "totalCount": 0,
+                    "status": data.get("status")}
+
         return data
+    except json.JSONDecodeError as e:
+        print(f"  [ERROR] {api_id}: 响应解析失败 {e}")
+        return {"code": "error", "result": [], "totalCount": 0}
+    except subprocess.TimeoutExpired:
+        print(f"  [ERROR] {api_id}: 调用超时（120s）")
+        return {"code": "error", "result": [], "totalCount": 0}
     except Exception as e:
         print(f"  [ERROR] {api_id}: {e}")
         return {"code": "error", "result": [], "totalCount": 0}
@@ -274,8 +203,6 @@ def main():
         date = today.strftime("%Y-%m-%d")
 
     t_start = time.time()
-
-    _check_config()
 
     print(f"=== A股主线识别数据获取 ===")
     print(f"目标日期: {date}")
