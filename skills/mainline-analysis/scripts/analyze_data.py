@@ -150,10 +150,8 @@ def _get_limit_threshold(code, name):
 
 
 def is_limit_up(r):
-    """判断是否涨停"""
-    pct = safe_float(r.get("PRICE_LIMIT", 0))
-    threshold = _get_limit_threshold(r.get("STK_CODE", ""), r.get("STK_SHORT_NAME", ""))
-    return pct >= threshold * 0.99
+    """判断是否涨停（直接用接口字段，与交易所口径一致）"""
+    return r.get("PRICE_UPDOWN_TYPE_PAR") == "涨停"
 
 
 def analyze_market_environment(heat, industry_quotes, meta):

@@ -178,15 +178,11 @@ def _get_limit_threshold(code, name):
 
 
 def is_limit_up(r):
-    pct = safe_float(r.get("PRICE_LIMIT", 0))
-    threshold = _get_limit_threshold(r.get("STK_CODE", ""), r.get("STK_SHORT_NAME", ""))
-    return pct >= threshold * 0.99
+    return r.get("PRICE_UPDOWN_TYPE_PAR") == "涨停"
 
 
 def is_limit_down(r):
-    pct = safe_float(r.get("PRICE_LIMIT", 0))
-    threshold = _get_limit_threshold(r.get("STK_CODE", ""), r.get("STK_SHORT_NAME", ""))
-    return pct <= -threshold * 0.99
+    return r.get("PRICE_UPDOWN_TYPE_PAR") == "跌停"
 
 
 # ========== 主流程 ==========
