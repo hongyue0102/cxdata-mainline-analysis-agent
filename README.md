@@ -76,7 +76,6 @@ cxdata-mainline-analysis-agent/
 │   │   └── scripts/
 │   │       ├── fetch_data.py                      # 数据获取（subprocess 调 query.py）
 │   │       ├── analyze_data.py                    # 结构化分析（综合评分 + 情绪周期）
-│   │       ├── generate_report.py                 # 输出结构化 prompt（供 Agent LLM 使用）
 │   │       ├── auth.py / common.py /              # cxdata 官方鉴权四件套（拷自新版 skill）
 │   │       ├── cxda_cache_cli.py / query.py
 │   │       ├── requirements.txt

@@ -2,7 +2,7 @@
 """
 A股主线识别 - 数据分析脚本
 读取 fetch_data.py 拉取的 JSON 数据，按主线识别框架进行结构化分析，
-输出分析结果 JSON 供 generate_report.py 使用。
+输出 analysis.json 供 Agent LLM 生成六段式报告使用。
 
 使用方式：
     python analyze_data.py [日期]
