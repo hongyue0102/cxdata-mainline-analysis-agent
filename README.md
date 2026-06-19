@@ -88,6 +88,12 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-17 修复安全扫描命中的 SSRF 与 XSS 风险（commit 3fff527）
+
+- **SSRF**（真实）：`query.py cmd_api` 中 `api_id` 直接拼接到 URL path，存在 path traversal 风险。加正则白名单 `^[A-Za-z0-9_-]+$` 拦截；`cmd_page_size` 同步加白名单（防御深度）
+- **XSS**（误报处理）：删除历史残留脚本 `generate_report.py`（109 行，已不在执行链路），同步清理 README / analyze_data.py 中的引用，从源头消除扫描命中
+- 验证：path traversal payload（`../../admin/users`）和命令注入 payload（`; rm -rf /`）均被拦截；正常 api_id 调用不受影响
+
 ### 2026-06-17 涨跌停口径改为交易所封板字段
 
 - **问题**：旧逻辑用「涨幅 ≥ 阈值 × 0.99」近似判断涨停，因创业板/科创板涨停阈值是 20%、ST 折半等规则差异，导致统计数与行情软件不一致（旧：涨停 97 / 跌停 15；实际：涨停 98 / 跌停 21）
