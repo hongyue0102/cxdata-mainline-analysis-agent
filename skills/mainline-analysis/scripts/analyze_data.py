@@ -597,6 +597,123 @@ def analyze_sustainability(industry_quotes, stock_detail):
     return results
 
 
+def analyze_summary_and_observations(env, lines, emotion, anchors, index_quotes):
+    """
+    生成结构性总结与观察点（Python 固定，LLM 必须引用，不得自创）
+
+    输出三块：
+      - market_summary: 一句话总结（含 status/phase/core_line/second_line）
+      - observation_points: 明日观察重点（规则触发，LLM 必须全部涵盖）
+      - key_judgments: 当日关键判断（规则触发，LLM 必须在报告引用）
+    """
+    main_lines = lines.get("main_lines", [])
+    secondary = lines.get("secondary_hot", [])
+
+    core = main_lines[0] if len(main_lines) >= 1 else {}
+    second = main_lines[1] if len(main_lines) >= 2 else {}
+    core_name = core.get("name", "未知")
+    second_name = second.get("name", "未知")
+
+    status = env.get("status", "未知")
+    phase = emotion.get("phase", "未知")
+
+    # ===== 1. market_summary =====
+    market_summary = {
+        "one_line": f"市场处于「{status}·{phase}」阶段，结构性机会集中在 {core_name}（核心）+ {second_name}（第二主线）",
+        "status": status,
+        "phase": phase,
+        "core_line": core_name,
+        "second_line": second_name,
+    }
+
+    # ===== 2. observation_points =====
+    obs = []
+    limit_up_core = core.get("limit_up_count", 0)
+    if limit_up_core >= 3 and len(anchors) >= 2:
+        a0 = anchors[0].get("name", "")
+        a1 = anchors[1].get("name", "")
+        obs.append(f"{core_name} 板块涨停股次日分化情况，关注 {a0}、{a1} 能否守住高位")
+    elif limit_up_core >= 1:
+        obs.append(f"{core_name} 板块 {limit_up_core} 只涨停后能否扩散到更多成分股")
+
+    second_week = second.get("week_change", 0)
+    if second_week >= 20:
+        obs.append(f"{second_name}（周涨幅 {second_week:.1f}%）加速段持续性，是否出现高位分歧")
+
+    attack_secondary = [s for s in secondary if s.get("line_type") == "资金攻击型"]
+    if attack_secondary:
+        names = "、".join(s["name"] for s in attack_secondary[:3])
+        obs.append(f"次级热点（{names}）能否接力补涨")
+    elif secondary:
+        obs.append("次级热点缺少资金攻击型方向，主线扩散力度待观察")
+
+    hot_index = env.get("hot_index", 0)
+    if hot_index < 50:
+        obs.append(f"大盘温度（{hot_index:.1f}）能否回升至 50 以上")
+
+    up_ratio = env.get("up_ratio", 0)
+    if up_ratio < 50:
+        obs.append(f"上涨家数比（{up_ratio:.1f}%）能否突破 50%")
+
+    limit_down = env.get("limit_down", 0)
+    if limit_down >= 30:
+        obs.append(f"跌停家数（{limit_down} 家）能否回落到 20 家以下")
+
+    limit_up_total = env.get("limit_up", 0)
+    if limit_down >= limit_up_total and limit_up_total > 0:
+        obs.append(f"跌停 {limit_down} 家 ≥ 涨停 {limit_up_total} 家，注意杀跌风险是否扩散")
+
+    # 指数判断
+    idx_map = {i["name"]: i for i in index_quotes}
+    sh = idx_map.get("上证指数", {})
+    sz = idx_map.get("深证成指", {})
+    cy = idx_map.get("创业板指", {})
+    sh_pct = sh.get("change_pct", 0)
+    sz_pct = sz.get("change_pct", 0)
+    cy_pct = cy.get("change_pct", 0)
+    if sh_pct <= -1:
+        obs.append(f"沪指（{sh_pct:+.2f}%）能否企稳，权重走弱是否拖累整体情绪")
+    if cy_pct >= 1.5:
+        obs.append(f"创业板（{cy_pct:+.2f}%）领涨能否延续，成长风格是否持续占优")
+
+    # ===== 3. key_judgments =====
+    judgments = []
+    rising = env.get("rising_industries", 0)
+    falling = env.get("falling_industries", 0)
+    if rising + falling > 0:
+        if rising <= falling * 0.5:
+            judgments.append(f"行业涨跌比 {rising}/{falling}，下跌方向占绝对多数")
+        elif rising >= falling * 2:
+            judgments.append(f"行业涨跌比 {rising}/{falling}，上涨方向占绝对多数")
+
+    if limit_up_total > 0 and limit_up_core / limit_up_total >= 0.3:
+        pct = limit_up_core / limit_up_total * 100
+        judgments.append(f"{core_name} 贡献 {limit_up_core} 只涨停（占全市场 {pct:.0f}%），资金高度集中")
+
+    if second_week >= 25:
+        judgments.append(f"{second_name} 周涨幅 {second_week:.1f}%，处于加速段")
+
+    for s in secondary:
+        if s.get("composite_score", 0) >= 70:
+            judgments.append(f"{s['name']}（得分 {s['composite_score']}）接近主线强度，可能接力")
+
+    sealed = emotion.get("strength", {}).get("sealed", 0)
+    broken_rate = emotion.get("strength", {}).get("broken_rate", 0)
+    if broken_rate >= 10:
+        judgments.append(f"炸板率 {broken_rate:.0f}%，封板意愿下降")
+    elif broken_rate == 0 and sealed >= 30:
+        judgments.append(f"炸板率 0%，封板 {sealed} 家，资金封板坚决")
+
+    if (sh_pct > 0) != (sz_pct > 0):
+        judgments.append(f"沪深分化：沪指 {sh_pct:+.2f}% / 深指 {sz_pct:+.2f}%，资金风格切换")
+
+    return {
+        "market_summary": market_summary,
+        "observation_points": obs,
+        "key_judgments": judgments,
+    }
+
+
 def main():
     date = sys.argv[1] if len(sys.argv) > 1 else "latest"
 
@@ -705,6 +822,8 @@ def main():
             "amount": round(safe_float(idx.get("TRADE_AMUT")) / 1e8, 1),
         })
 
+    summary_pkg = analyze_summary_and_observations(env, lines, emotion, anchors, slim_index)
+
     analysis = {
         "date": meta.get("date", date),
         "index_quotes": slim_index,
@@ -727,6 +846,9 @@ def main():
             "total_neg": total_neg,
             "hot_stocks": hot_stocks,
         },
+        "market_summary": summary_pkg["market_summary"],
+        "observation_points": summary_pkg["observation_points"],
+        "key_judgments": summary_pkg["key_judgments"],
     }
 
     output = DATA_DIR / "analysis.json"
