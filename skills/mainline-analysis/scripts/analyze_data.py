@@ -498,15 +498,20 @@ def analyze_summary_and_observations(env, lines, emotion, anchors, index_quotes)
     obs = []
     limit_up_core = core.get("limit_up_count", 0)
     if limit_up_core >= 3 and len(anchors) >= 2:
-        a0 = anchors[0].get("name", "")
-        a1 = anchors[1].get("name", "")
-        obs.append(f"{core_name} 板块涨停股次日分化情况，关注 {a0}、{a1} 能否守住高位")
+        # 从锚点里筛出属于核心主线的票取前两名，避免张冠李戴
+        # （旧版取全局 anchors[0]/[1]，可能属其他板块，如核心是玻纤却写出面板股）
+        core_anchors = [a for a in anchors if a.get("industry") == core_name]
+        pick = core_anchors if len(core_anchors) >= 2 else anchors
+        a0 = pick[0].get("name", "")
+        a1 = pick[1].get("name", "") if len(pick) >= 2 else ""
+        focus = f"关注 {a0}、{a1} 能否守住高位" if a1 else f"关注 {a0} 能否守住高位"
+        obs.append(f"{core_name} 板块涨停股次日分化情况，{focus}")
     elif limit_up_core >= 1:
         obs.append(f"{core_name} 板块 {limit_up_core} 只涨停后能否扩散到更多成分股")
 
     second_week = second.get("week_change", 0)
     if second_week >= 20:
-        obs.append(f"{second_name}（周涨幅 {second_week:.1f}%）加速段持续性，是否出现高位分歧")
+        obs.append(f"{second_name}（周涨幅 {second_week:.1f}%）高位持续性，是否出现分歧")
 
     attack_secondary = [s for s in secondary if s.get("line_type") == "资金攻击型"]
     if attack_secondary:
@@ -559,7 +564,7 @@ def analyze_summary_and_observations(env, lines, emotion, anchors, index_quotes)
         judgments.append(f"{core_name} 贡献 {limit_up_core} 只涨停（占全市场 {pct:.0f}%），资金高度集中")
 
     if second_week >= 25:
-        judgments.append(f"{second_name} 周涨幅 {second_week:.1f}%，处于加速段")
+        judgments.append(f"{second_name} 周涨幅 {second_week:.1f}%，处于高位")
 
     for s in secondary:
         if s.get("composite_score", 0) >= 70:
