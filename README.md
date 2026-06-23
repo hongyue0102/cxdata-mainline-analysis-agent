@@ -88,6 +88,22 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-23 积分记账完整性修复 + pageSize 动态化
+
+同事反馈两条积分相关问题，均已修复：
+
+**1. 积分记账漏统计（根因：并发写覆盖）**
+- **现象**：完整 fetch 实际调用上百次，账本只记几条；session summary 严重偏低
+- **根因**：fetch_data 的市值/行业分类步骤用 ThreadPoolExecutor(max_workers=5) 并发调 query.py，5 个 subprocess 同时「读账本→追加→写账本」，flock 只锁了写瞬间没锁读-改-写整个临界区，后写覆盖先写
+- **修复**：`query.py` 新增 `_ledger_lock()`（flock 排他锁），把 `_record_call_if_billable` 和 `_guard_before_billable_api_call` 的「读-改-写」整个包进临界区；并发记账不再丢失
+- **规范对齐**：fetch_data 开头调 `session start`（重置账本），结尾调 `session summary` 输出消耗；积分消耗以 session summary 返回为准，不由 AI 自行统计
+
+**2. pageSize 写死 10000 导致分页错误**
+- **现象**：`fetch_all_pages` 写死 pageSize=10000，但各接口 maxPageSize 不同（如 getStkDayQuoByCond-G 实际 1000），客户端按写死值算分页数会错
+- **修复**：`fetch_data.py` 新增 `_get_max_page_size(api_id)`，通过 `query.py page-size` 动态获取接口实际 maxPageSize；fetch_all_pages 和 fetch_industry_by_level 均改用动态值
+
+**效果**（6-18 验证）：记账完整——9 个接口全部记录，58 次计费调用 / 630 积分（修复前因覆盖只记到 2-8 次）；分页正确——按接口实际 maxPageSize 分页
+
 ### 2026-06-23 移除舆情数据源（积分成本优化）
 
 - **问题**：舆情接口（getIndexLyricalList1/2）单次消耗 100 积分，是所有接口里最贵的；每次完整 fetch 查 103只×2=206次，约占会话积分消耗 87%。但舆情在报告里仅用于「催化因素」一句话，性价比极低。
