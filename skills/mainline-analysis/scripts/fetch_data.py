@@ -37,8 +37,6 @@ _ALLOWED_APIS = frozenset([
     "getDStkValueMidByCond-G",
     "getDPubComInfo1ByCond-G",
     "getPubInduCodeByCond-G",
-    "getIndexLyricalList2ByCond-G",
-    "getIndexLyricalList1ByCond-G",
     "getDStkBlockTradeByCond-G",
 ])
 
@@ -372,9 +370,9 @@ def main():
     save("stock_value.json", stock_value)
 
     # ========================================
-    # 6/8 涨停股行业分类 + 舆情（并发查询）
+    # 6/8 涨停股行业分类（申万二级）
     # ========================================
-    print("[6/8] 涨停股行业分类 + 舆情...")
+    print("[6/8] 涨停股行业分类...")
 
     def query_stock_detail(r):
         code = r.get("STK_CODE", "")
@@ -406,18 +404,6 @@ def main():
                 sw_l2_name = chosen[0].get("INDU_NAME2", "")
                 sw_l2_code = chosen[0].get("INDU_CODE2", "")
 
-        pos_data = call_api("getIndexLyricalList2ByCond-G",
-                            {"code": code, "indexDate": date, "pageNum": "1", "pageSize": "5"})
-        neg_data = call_api("getIndexLyricalList1ByCond-G",
-                            {"code": code, "indexDate": date, "pageNum": "1", "pageSize": "5"})
-
-        pos_results = pos_data.get("result", [])
-        neg_results = neg_data.get("result", [])
-        pos_count = sum(safe_int(p.get("ALL_REPORT_COUNT")) for p in pos_results)
-        neg_count = sum(safe_int(p.get("ALL_REPORT_COUNT")) for p in neg_results)
-        pos_index = max((safe_float(p.get("TODAY_INDEX")) for p in pos_results), default=0)
-        neg_index = max((safe_float(p.get("TODAY_INDEX")) for p in neg_results), default=0)
-
         return {
             "code": code,
             "name": name,
@@ -426,12 +412,6 @@ def main():
             "sw_industry_s": info.get("INDU_CLASS_NAME_S", ""),   # 申万三级名
             "sw_industry_q": info.get("INDU_CLASS_NAME_Q", ""),   # GICS口径，仅参考
             "sw_industry_z": info.get("INDU_CLASS_NAME_Z", ""),
-            "pos_count": pos_count,
-            "neg_count": neg_count,
-            "pos_index": pos_index,
-            "neg_index": neg_index,
-            "pos_titles": [p.get("REGULA_TITLE", "") or p.get("TITLE", "") for p in pos_results if p.get("REGULA_TITLE") or p.get("TITLE")],
-            "neg_titles": [p.get("REGULA_TITLE", "") or p.get("TITLE", "") for p in neg_results if p.get("REGULA_TITLE") or p.get("TITLE")],
         }
 
     stock_detail = []

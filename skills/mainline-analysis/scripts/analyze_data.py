@@ -407,16 +407,6 @@ def analyze_emotion_cycle(meta, market_heat):
 
 def analyze_sustainability(industry_quotes, stock_detail):
     """第五步：评估主线持续性"""
-    # 构建行业 → 舆情总量的映射（用证监会行业名匹配）
-    industry_sentiment = {}
-    for d in stock_detail:
-        ind = d.get("sw_industry_q", "")
-        if ind:
-            if ind not in industry_sentiment:
-                industry_sentiment[ind] = {"pos": 0, "neg": 0}
-            industry_sentiment[ind]["pos"] += d.get("pos_count", 0)
-            industry_sentiment[ind]["neg"] += d.get("neg_count", 0)
-
     results = []
     for ind in industry_quotes[:3]:
         name = ind.get("INDU_CLASS_NAME", "")
@@ -435,14 +425,6 @@ def analyze_sustainability(industry_quotes, stock_detail):
         if day > 2:
             score += 1
             reasons.append("日涨幅领先")
-
-        # 舆情匹配（遍历证监会行业寻找包含关系）
-        for ind_q, sent in industry_sentiment.items():
-            if ind_q and (name in ind_q or ind_q in name):
-                if sent["pos"] > 0:
-                    score += 1
-                    reasons.append(f"正面舆情{sent['pos']}条")
-                break
 
         if score >= 3:
             level = "强"
@@ -682,25 +664,15 @@ def main():
             "amount": round(safe_float(s.get("TRADE_AMUT")) / 1e8, 2),
         })
 
-    # 按三级行业归类涨停股 + 舆情
+    # 按三级行业归类涨停股
     detail_map = {r["code"]: r for r in stock_detail}
     industry_groups = {}
-    total_pos = 0
-    total_neg = 0
-    hot_stocks = []
     for s in slim_limit_ups:
         info = detail_map.get(s["code"], {})
         ind = info.get("sw_industry_s") or info.get("sw_industry_q") or "未知"
         if ind not in industry_groups:
             industry_groups[ind] = []
-        industry_groups[ind].append({**s, "pos_count": info.get("pos_count", 0), "neg_count": info.get("neg_count", 0),
-                                      "pos_titles": info.get("pos_titles", []), "neg_titles": info.get("neg_titles", [])})
-        total_pos += info.get("pos_count", 0)
-        total_neg += info.get("neg_count", 0)
-        if info.get("pos_count", 0) >= 3 or info.get("pos_index", 0) >= 5:
-            hot_stocks.append({"name": s["name"], "code": s["code"],
-                               "pos_count": info.get("pos_count", 0), "pos_index": info.get("pos_index", 0),
-                               "pos_titles": info.get("pos_titles", [])})
+        industry_groups[ind].append(s)
     sorted_industry_groups = sorted(industry_groups.items(), key=lambda x: len(x[1]), reverse=True)
     limit_up_by_industry = [{"industry": ind, "count": len(stocks), "stocks": stocks}
                             for ind, stocks in sorted_industry_groups]
@@ -745,11 +717,6 @@ def main():
         "limit_up_details": slim_limit_ups,
         "limit_up_by_industry": limit_up_by_industry,
         "abnormal_summary": slim_abnormal,
-        "opinion": {
-            "total_pos": total_pos,
-            "total_neg": total_neg,
-            "hot_stocks": hot_stocks,
-        },
         "market_summary": summary_pkg["market_summary"],
         "observation_points": summary_pkg["observation_points"],
         "key_judgments": summary_pkg["key_judgments"],
