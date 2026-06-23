@@ -41,11 +41,19 @@ def detect_workspace() -> Path:
         path = os.environ.get(env_var)
         if path:
             workspace = Path(path).expanduser().resolve()
-            workspace.mkdir(parents=True, exist_ok=True)
+            workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                os.chmod(workspace, 0o700)
+            except OSError:
+                pass
             return workspace
 
     workspace = Path.home() / ".cxda-cache"
-    workspace.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(workspace, 0o700)
+    except OSError:
+        pass
     return workspace
 
 
@@ -61,19 +69,70 @@ class CacheManager:
     def _ensure_structure(self):
         """确保基础目录结构存在"""
         shared_dir = self.workspace / ".shared"
-        shared_dir.mkdir(parents=True, exist_ok=True)
+        shared_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 已存在的目录权限不随 mkdir 改变，显式收紧一次（防御风险6）
+        try:
+            os.chmod(shared_dir, 0o700)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _safe_join(base: Path, *parts: str) -> Path:
+        """安全路径拼接：resolve 后校验结果必须仍在 base 目录内，拒绝路径遍历（风险1/4）。
+
+        攻击者若传入含 `..` 的 filename/skill_name，纯 Path 拼接会跟随 `..` 逃出 base；
+        此处 resolve 后检查是否以 base 开头，逃逸则抛 ValueError。
+        """
+        base_resolved = base.resolve()
+        target = base.resolve()
+        for p in parts:
+            target = target / p
+        target = target.resolve()
+        base_str = str(base_resolved)
+        target_str = str(target)
+        # 必须等于 base 或在 base/ 之下（用 os.sep 防止 /a/b 匹配到 /a/bc）
+        if target_str != base_str and not target_str.startswith(base_str + os.sep):
+            raise ValueError(f"非法路径（拒绝路径遍历）: {os.sep.join(str(p) for p in parts)}")
+        return target
+
+    @staticmethod
+    def _secure_write_text(file_path: Path, content: str, append: bool = False) -> None:
+        """以 0o600 权限写文本文件（防御风险6：默认 0o644 可被同机用户读取）。
+
+        用 os.open + O_CREAT 指定 mode，不依赖 umask；同时保留 fcntl 文件锁。
+        """
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+        fd = os.open(file_path, flags, 0o600)
+        try:
+            with os.fdopen(fd, "a" if append else "w", encoding="utf-8") as f:
+                if _HAS_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(content)
+                finally:
+                    if _HAS_FCNTL:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            raise
 
     # ==================== 公域数据管理 ====================
 
     def _get_shared_path(self, filename: str) -> Path:
-        """获取公域文件路径"""
+        """获取公域文件路径（含路径遍历防护）"""
         shared_dir = self.workspace / ".shared"
-        shared_dir.mkdir(parents=True, exist_ok=True)
-        return shared_dir / filename
+        shared_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(shared_dir, 0o700)
+        except OSError:
+            pass
+        return self._safe_join(shared_dir, filename)
 
     def shared_read(self, filename: str) -> dict:
         """读取公域文件"""
-        file_path = self._get_shared_path(filename)
+        try:
+            file_path = self._get_shared_path(filename)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         if not file_path.exists():
             return {"success": False, "error": f"文件不存在: {file_path}"}
@@ -85,26 +144,23 @@ class CacheManager:
             return {"success": False, "error": str(e)}
 
     def shared_write(self, filename: str, content: str) -> dict:
-        """写入公域文件（带文件锁保护）"""
+        """写入公域文件（带文件锁保护，权限 0o600）"""
         file_path = self._get_shared_path(filename)
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                if _HAS_FCNTL:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(content)
-                finally:
-                    if _HAS_FCNTL:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
+            self._secure_write_text(file_path, content, append=False)
             return {"success": True, "path": str(file_path), "file": filename}
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def shared_delete(self, filename: str) -> dict:
         """删除公域文件"""
-        file_path = self._get_shared_path(filename)
+        try:
+            file_path = self._get_shared_path(filename)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         if not file_path.exists():
             return {"success": False, "error": f"文件不存在: {file_path}"}
@@ -194,33 +250,32 @@ class CacheManager:
     }
 
     def _get_skill_path(self, skill_name: str, subdir: str = "data") -> Path:
-        """获取 Skill 目录路径"""
+        """获取 Skill 目录路径（含路径遍历防护）"""
         if subdir not in self.SUBDIR_TYPES:
             raise ValueError(f"未知子目录类型: {subdir}。可用: {list(self.SUBDIR_TYPES.keys())}")
-        skill_path = self.workspace / skill_name / subdir
-        skill_path.mkdir(parents=True, exist_ok=True)
+        skill_path = self._safe_join(self.workspace, skill_name, subdir)
+        skill_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(skill_path, 0o700)
+        except OSError:
+            pass
         return skill_path
 
     def _get_file_path(self, skill_name: str, filename: str, subdir: str = "data") -> Path:
-        """获取文件完整路径"""
-        return self._get_skill_path(skill_name, subdir) / filename
+        """获取文件完整路径（含路径遍历防护）"""
+        skill_path = self._get_skill_path(skill_name, subdir)
+        return self._safe_join(skill_path, filename)
 
     def write(self, skill_name: str, filename: str, content: str,
               subdir: str = "data", append: bool = False) -> dict:
-        """写入私域文件"""
-        file_path = self._get_file_path(skill_name, filename, subdir)
-        mode = "a" if append else "w"
+        """写入私域文件（权限 0o600）"""
+        try:
+            file_path = self._get_file_path(skill_name, filename, subdir)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         try:
-            with open(file_path, mode, encoding="utf-8") as f:
-                if _HAS_FCNTL:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(content)
-                finally:
-                    if _HAS_FCNTL:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
+            self._secure_write_text(file_path, content, append=append)
             return {
                 "success": True,
                 "path": str(file_path),
@@ -233,7 +288,10 @@ class CacheManager:
 
     def read(self, skill_name: str, filename: str, subdir: str = "data") -> dict:
         """读取私域文件"""
-        file_path = self._get_file_path(skill_name, filename, subdir)
+        try:
+            file_path = self._get_file_path(skill_name, filename, subdir)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         if not file_path.exists():
             return {"success": False, "error": f"文件不存在: {file_path}"}
@@ -252,7 +310,10 @@ class CacheManager:
 
     def delete(self, skill_name: str, filename: str, subdir: str = "data") -> dict:
         """删除私域文件"""
-        file_path = self._get_file_path(skill_name, filename, subdir)
+        try:
+            file_path = self._get_file_path(skill_name, filename, subdir)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         if not file_path.exists():
             return {"success": False, "error": f"文件不存在: {file_path}"}
@@ -270,11 +331,14 @@ class CacheManager:
 
     def list_files(self, skill_name: str, subdir: str = None) -> dict:
         """列出文件"""
-        if subdir:
-            paths = [self._get_skill_path(skill_name, subdir)]
-        else:
-            skill_root = self.workspace / skill_name
-            paths = [skill_root / d for d in self.SUBDIR_TYPES.keys()]
+        try:
+            if subdir:
+                paths = [self._get_skill_path(skill_name, subdir)]
+            else:
+                skill_root = self._safe_join(self.workspace, skill_name)
+                paths = [skill_root / d for d in self.SUBDIR_TYPES.keys()]
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         result = {}
         for path in paths:

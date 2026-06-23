@@ -14,99 +14,6 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / "data"
 
-# 申万三级行业关键词 → 二级行业映射（用于涨停股归集到二级行业）
-SW_L3_TO_L2_KEYWORDS = {
-    # 半导体
-    "半导体": "半导体", "芯片": "半导体", "集成电路": "半导体", "分立器件": "半导体",
-    "模拟芯片": "半导体", "数字芯片": "半导体",
-    # 光学光电
-    "光学": "光学光电", "LED": "光学光电", "显示": "光学光电", "面板": "光学光电",
-    # 消费电子
-    "消费电子": "消费电子", "品牌消费电子": "消费电子",
-    # 元件
-    "PCB": "元件", "印制电路": "元件", "被动元件": "元件", "连接器": "元件",
-    # 电子化学品
-    "电子化学品": "电子化学品", "光刻": "电子化学品",
-    # 计算机
-    "软件": "软件开发", "IT服务": "IT服务", "计算机设备": "计算机设备",
-    "云计算": "软件开发", "网络安全": "软件开发", "安防": "计算机设备",
-    # 通信
-    "通信": "通信设备", "光模块": "通信设备", "光纤": "通信设备",
-    # 传媒
-    "游戏": "游戏", "影视": "影视院线", "广告": "广告营销", "出版": "出版",
-    "互联网": "数字媒体", "数字媒体": "数字媒体",
-    # 医药
-    "化学制剂": "化学制药", "中药": "中药", "生物制品": "生物制品",
-    "医疗器械": "医疗器械", "医疗设备": "医疗器械", "CXO": "医疗服务",
-    "医疗研发外包": "医疗服务", "原料药": "化学制药", "医药流通": "医药商业",
-    # 电力设备
-    "光伏": "光伏设备", "风电": "风电设备", "锂电池": "电池",
-    "储能": "电池", "电池化学品": "电池", "电网": "电网设备",
-    # 机械设备
-    "工程机械": "专用设备", "仪器仪表": "仪器仪表", "激光": "通用设备",
-    "机器人": "自动化设备", "工控": "自动化设备", "自动化": "自动化设备",
-    "专用设备": "专用设备", "通用设备": "通用设备", "制冷空调": "通用设备",
-    "金属制品": "金属制品",
-    # 国防军工
-    "军工": "航空装备", "航空装备": "航空装备", "航天": "航天装备",
-    "兵器": "航天装备", "军工电子": "军工电子",
-    # 汽车
-    "乘用车": "乘用车", "商用车": "商用车", "汽车零部件": "汽车零部件",
-    # 有色金属
-    "铜": "工业金属", "铝": "工业金属", "锂": "能源金属", "钴": "能源金属",
-    "镍": "能源金属", "稀土": "能源金属", "铅锌": "工业金属", "黄金": "贵金属",
-    "磁性材料": "金属新材料",
-    # 基础化工
-    "化学制品": "化学制品", "塑料": "塑料", "橡胶": "橡胶",
-    "涂料": "化学制品", "膜材料": "化学制品", "农药": "农化制品",
-    "氮肥": "化学原料", "磷化工": "化学原料", "氯碱": "化学原料",
-    # 公用事业
-    "火力发电": "火力发电", "燃气": "燃气",
-    # 环保
-    "环保": "环境治理", "水务": "水务", "固废": "环境治理",
-    # 煤炭
-    "煤炭开采": "煤炭开采", "焦炭": "焦炭",
-    # 石油石化
-    "石油": "油气开采", "石化": "炼化及贸易", "炼化": "炼化及贸易",
-    # 银行
-    "银行": "国有大型银行",
-    # 非银金融
-    "证券": "证券", "保险": "保险", "信托": "多元金融",
-    # 房地产
-    "住宅开发": "房地产开发", "产业地产": "房地产开发",
-    # 建筑装饰
-    "装修": "装修装饰", "装饰": "装修装饰", "基建": "基建市政",
-    # 建筑材料
-    "水泥": "水泥", "玻璃": "玻璃玻纤", "玻纤": "玻璃玻纤",
-    # 钢铁
-    "钢铁": "普钢", "特钢": "特钢",
-    # 农林牧渔
-    "种业": "种植业", "饲料": "饲料", "养殖": "养殖",
-    "农产品加工": "农产品加工", "渔业": "渔业",
-    # 食品饮料
-    "白酒": "白酒", "啤酒": "非白酒", "乳制品": "饮料乳品",
-    "调味品": "调味品", "饮料": "饮料乳品", "零食": "零食",
-    # 家用电器
-    "白电": "白色家电", "厨电": "黑色家电", "小家电": "小家电",
-    "清洁家电": "小家电", "家电零部件": "白色家电",
-    # 纺织服饰
-    "纺织": "纺织制造", "服装": "服装家纺", "鞋帽": "饰品",
-    # 轻工制造
-    "造纸": "造纸", "家具": "家居", "包装": "包装印刷",
-    "文具": "文娱用品", "家居": "家居",
-    # 商贸零售
-    "百货": "一般零售", "超市": "一般零售", "专业零售": "专业连锁",
-    # 社会服务
-    "旅游": "旅游及景区", "酒店": "酒店餐饮", "教育": "教育",
-    "餐饮": "酒店餐饮",
-    # 交通运输
-    "快递": "物流", "物流": "物流", "航空": "航空机场",
-    "港口": "航运港口", "铁路": "铁路公路", "航运": "航运港口",
-    "高速公路": "铁路公路",
-    # 美容护理
-    "化妆品": "化妆品", "医美": "医疗美容",
-}
-
 
 def load(name: str) -> list:
     with open(DATA_DIR / name, encoding="utf-8") as f:
@@ -203,46 +110,13 @@ def analyze_market_environment(heat, industry_quotes, meta):
     }
 
 
-def _match_l2_from_industry_name(sw_name, l2_standard_names=None):
-    """从申万三级行业/证监会行业名匹配到二级行业。
 
-    若提供 l2_standard_names（L2 行业标准名集合），会优先返回能精确匹配
-    标准名的 L2 名（处理"白酒Ⅲ"→"白酒Ⅱ"、"元件"→"元件" 等带后缀变体）；
-    匹配不到时回退到关键词表的默认映射。
-    """
-    if not sw_name:
-        return None
-
-    # 1) 先尝试精确匹配 L2 标准名（去掉 Ⅱ/Ⅲ/Ⅳ 等罗马数字后缀后做包含匹配）
-    if l2_standard_names:
-        import re
-        # 去掉末尾的罗马数字后缀（Ⅱ、Ⅲ、Ⅳ 等）后做"包含"匹配
-        sw_clean = re.sub(r'[ⅡⅢⅣⅤⅠ]+$', '', sw_name).strip()
-        for std_name in l2_standard_names:
-            std_clean = re.sub(r'[ⅡⅢⅣⅤⅠ]+$', '', std_name).strip()
-            if std_clean and (std_clean == sw_clean or std_clean in sw_name or sw_clean in std_name):
-                return std_name
-
-    # 2) 回退到关键词表
-    for keyword, l2_name in SW_L3_TO_L2_KEYWORDS.items():
-        if keyword in sw_name:
-            # 若关键词表返回值能匹配到标准名（带后缀），用标准名
-            if l2_standard_names:
-                for std_name in l2_standard_names:
-                    import re
-                    std_clean = re.sub(r'[ⅡⅢⅣⅤⅠ]+$', '', std_name).strip()
-                    if std_clean == l2_name:
-                        return std_name
-            return l2_name
-    return None
-
-
-def analyze_main_lines(industry_l2_quotes, stock_top_rise, abnormal_trade, stock_detail=None):
+def analyze_main_lines(industry_l2_quotes, limit_up_full, abnormal_trade, stock_detail=None):
     """第二步：识别主线与次级热点（基于二级行业涨幅 + 涨停集中度）"""
     bottom_industries = industry_l2_quotes[-3:] if len(industry_l2_quotes) >= 3 else []
 
     # 涨停股按板块归类
-    limit_up_stocks = [s for s in stock_top_rise if is_limit_up(s)]
+    limit_up_stocks = [s for s in limit_up_full if is_limit_up(s)]
 
     # 从异动数据提取活跃方向
     active_directions = {}
@@ -262,21 +136,29 @@ def analyze_main_lines(industry_l2_quotes, stock_top_rise, abnormal_trade, stock
     if stock_detail:
         detail_map = {r.get("code", ""): r for r in stock_detail}
 
-    # L2 标准行业名清单（用于精确匹配）
+    # L2 标准行业名清单（用于漏归自检）
     l2_standard_names = [ind.get("INDU_CLASS_NAME", "") for ind in industry_l2_quotes
                          if ind.get("INDU_CLASS_NAME")]
     l2_standard_set = set(l2_standard_names)
 
+    # 申万二级归并：直接用 fetch 阶段取好的 sw_industry_l2（申万2021口径）精确匹配，
+    # 不再用 _match_l2_from_industry_name 字符串包含匹配（旧版用 GICS 名瞎猜，14.6% 漏归）。
     l2_limit_count = {}
+    unmatched_codes = []
     for s in limit_up_stocks:
         code = s.get("STK_CODE", "")
         info = detail_map.get(code, {})
-        sw_s = info.get("sw_industry_s", "")
-        sw_q = info.get("sw_industry_q", "")
-        matched = (_match_l2_from_industry_name(sw_s, l2_standard_set)
-                   or _match_l2_from_industry_name(sw_q, l2_standard_set))
-        if matched:
-            l2_limit_count[matched] = l2_limit_count.get(matched, 0) + 1
+        sw_l2 = info.get("sw_industry_l2", "")
+        if sw_l2 and sw_l2 in l2_standard_set:
+            l2_limit_count[sw_l2] = l2_limit_count.get(sw_l2, 0) + 1
+        else:
+            unmatched_codes.append((code, s.get("STK_SHORT_NAME", ""), sw_l2))
+    # 漏归自检：申万二级缺失或不在板块列表的，告警（防止静默漏算涨停集中度）
+    if unmatched_codes:
+        print(f"  [WARN][行业归并] {len(unmatched_codes)}/{len(limit_up_stocks)} 只涨停股未归入任何"
+              f"申万二级（行业分类缺失或未命中板块列表），主线涨停数可能偏少：")
+        for code, name, sw in unmatched_codes[:10]:
+            print(f"    {code} {name}: sw_industry_l2={sw!r}")
 
     max_limit = max(l2_limit_count.values()) if l2_limit_count else 0
 
@@ -334,14 +216,14 @@ def analyze_main_lines(industry_l2_quotes, stock_top_rise, abnormal_trade, stock
     }
 
 
-def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
+def analyze_anchor_stocks(limit_up_full, stock_value, limit_up_count,
                           main_line_names=None, stock_detail=None, l2_standard_names=None):
     """第三步：识别龙头、中军、补涨 — 只从核心主线和第二主线的涨停股中选"""
-    limit_ups = [s for s in stock_top_rise
+    limit_ups = [s for s in limit_up_full
                  if is_limit_up(s) and safe_float(s.get("PRICE_LIMIT")) < 100
                  and "ST" not in (s.get("STK_SHORT_NAME") or "")]
 
-    # 如果有主线行业名，只保留属于主线行业的涨停股
+    # 如果有主线行业名，只保留属于主线行业的涨停股（用申万二级精确匹配）
     if main_line_names and stock_detail:
         detail_map = {r.get("code", ""): r for r in stock_detail}
         main_line_set = set(main_line_names)
@@ -349,11 +231,8 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
         for s in limit_ups:
             code = s.get("STK_CODE", "")
             info = detail_map.get(code, {})
-            sw_s = info.get("sw_industry_s", "")
-            sw_q = info.get("sw_industry_q", "")
-            matched = (_match_l2_from_industry_name(sw_s, l2_standard_names)
-                       or _match_l2_from_industry_name(sw_q, l2_standard_names))
-            if matched and matched in main_line_set:
+            sw_l2 = info.get("sw_industry_l2", "")
+            if sw_l2 and sw_l2 in main_line_set:
                 filtered.append(s)
         # 主线涨停股不足5只时回退到全市场
         limit_ups = filtered if len(filtered) >= 5 else limit_ups
@@ -377,13 +256,9 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
         val = value_map.get(code, {})
         total_val = val.get("total_value", 0)
 
-        # 解析个股的 L2 行业归属
+        # 解析个股的申万二级行业归属（fetch 阶段已取好，精确匹配板块列表）
         info = detail_map.get(code, {})
-        sw_s = info.get("sw_industry_s", "")
-        sw_q = info.get("sw_industry_q", "")
-        industry = (_match_l2_from_industry_name(sw_s, l2_standard_names)
-                    or _match_l2_from_industry_name(sw_q, l2_standard_names)
-                    or sw_s or "未知")
+        industry = info.get("sw_industry_l2", "") or "未知"
 
         if total_val > 500e8:
             role = "趋势中军"
@@ -418,15 +293,10 @@ def analyze_anchor_stocks(stock_top_rise, stock_value, limit_up_count,
     return anchors
 
 
-def analyze_emotion_cycle(meta, stock_top_rise, abnormal_trade, market_heat):
+def analyze_emotion_cycle(meta, market_heat):
     """第四步：判断当前情绪（三维加权：广度40%+强度35%+量能25%）"""
     limit_up = meta.get("limit_up_count", 0)
     limit_down = meta.get("limit_down_count", 0)
-
-    # 涨停股列表（排除新股和ST股）
-    limit_ups = [s for s in stock_top_rise
-                 if is_limit_up(s) and safe_float(s.get("PRICE_LIMIT")) < 100
-                 and "ST" not in (s.get("STK_SHORT_NAME") or "")]
 
     h = market_heat[0] if market_heat else {}
     up_ratio = safe_float(h.get("UP_NUM_PER"))
@@ -472,20 +342,18 @@ def analyze_emotion_cycle(meta, stock_top_rise, abnormal_trade, market_heat):
     breadth_score = round(lu_score * 0.4 + ld_score * 0.3 + ur_score * 0.3)
 
     # === 2. 强度维度（35%）===
-    broken = 0
-    sealed = 0
-    for s in limit_ups:
-        close = safe_float(s.get("CLOSE_PRICE"))
-        high = safe_float(s.get("HIGH_PRICE"))
-        if high > 0 and close < high * 0.999:
-            broken += 1
-        else:
-            sealed += 1
-    total_limit_up = broken + sealed
-    broken_rate = round(broken / total_limit_up * 100, 1) if total_limit_up > 0 else 0
+    # 封板/炸板口径（修正旧版 bug）：
+    #   封板 sealed = 收盘封住涨停（= 涨停数 limit_up_count，来自全市场行情全集）
+    #   炸板 broken = 盘中触及涨停但收盘未封（全市场行情反推，见 fetch_data.is_broken）
+    # 这两个数都来自全市场行情，与涨幅榜前 N 无关，避免旧版 103 vs 61 不一致。
+    # 数据由 fetch_data 计算后写入 meta；旧数据无 sealed_count/broken_count 时回退。
+    sealed = meta.get("sealed_count", meta.get("limit_up_count", 0))
+    broken = meta.get("broken_count", 0)
+    total_touched = sealed + broken  # 今天所有触过涨停板的股票
+    broken_rate = round(broken / total_touched * 100, 1) if total_touched > 0 else 0
 
-    # 改为综合封板数量和炸板率：封板绝对数量也很重要，不能只看比率
-    if total_limit_up == 0:
+    # 综合封板数量和炸板率：封板绝对数量也很重要，不能只看比率
+    if total_touched == 0:
         strength_score = 0
     elif sealed >= 80 and broken_rate <= 25:
         strength_score = 4
@@ -698,11 +566,18 @@ def analyze_summary_and_observations(env, lines, emotion, anchors, index_quotes)
             judgments.append(f"{s['name']}（得分 {s['composite_score']}）接近主线强度，可能接力")
 
     sealed = emotion.get("strength", {}).get("sealed", 0)
+    broken = emotion.get("strength", {}).get("broken", 0)
     broken_rate = emotion.get("strength", {}).get("broken_rate", 0)
-    if broken_rate >= 10:
-        judgments.append(f"炸板率 {broken_rate:.0f}%，封板意愿下降")
-    elif broken_rate == 0 and sealed >= 30:
-        judgments.append(f"炸板率 0%，封板 {sealed} 家，资金封板坚决")
+    # 封板率 = 封板数 / (封板数+炸板数)，反映资金封涨停的坚决程度。
+    # 按封板率分档输出客观判断，避免旧版『broken_rate==0 就无脑说坚决』。
+    if sealed + broken == 0:
+        pass  # 无涨停无炸板，不输出封板相关判断
+    elif broken_rate >= 40:
+        judgments.append(f"封板 {sealed} 家、炸板 {broken} 家，封板率仅 {100-broken_rate:.0f}%，封板意愿弱、追涨风险高")
+    elif broken_rate >= 20:
+        judgments.append(f"封板 {sealed} 家、炸板 {broken} 家，封板率 {100-broken_rate:.0f}%，封板一般")
+    else:
+        judgments.append(f"封板 {sealed} 家、炸板 {broken} 家，封板率 {100-broken_rate:.0f}%，资金封板坚决")
 
     if (sh_pct > 0) != (sz_pct > 0):
         judgments.append(f"沪深分化：沪指 {sh_pct:+.2f}% / 深指 {sz_pct:+.2f}%，资金风格切换")
@@ -728,30 +603,54 @@ def main():
     except FileNotFoundError:
         industry_l2_quotes = []
     stock_top_rise = load("stock_top_rise.json")
+    # 涨停股全集（封板成功的全部股票）。
+    # 旧版只有 stock_top_rise（涨幅榜前100），会丢失非涨幅靠前的涨停股，
+    # 导致主线/锚点/情绪分析用的涨停股不全（如 103 vs 61 不一致）。
+    try:
+        limit_up_full = load("limit_up_full.json")
+    except FileNotFoundError:
+        limit_up_full = None
+    # 若全集缺失或数量明显少于 meta 记录，回退到涨幅榜（并记录告警）
+    if not limit_up_full:
+        print("  [WARN] limit_up_full.json 缺失，回退到 stock_top_rise（涨停股可能不全）")
+        limit_up_full = [s for s in stock_top_rise if is_limit_up(s)]
     abnormal_trade = load("abnormal_trade.json")
     stock_value = load("stock_value.json")
     stock_detail = load("stock_detail.json")
     meta_data = load("meta.json")
     meta = meta_data[0] if meta_data else {}
 
+    # === 数据一致性自检（防止旧版『涨停103 vs 封板61』不一致再次发生）===
+    # meta.limit_up_count 是 fetch 阶段全市场统计的涨停数；
+    # limit_up_full 是写盘的全集。两者必须一致，否则下游主线/锚点/情绪全部偏。
+    meta_lu = meta.get("limit_up_count")
+    if meta_lu is not None and len(limit_up_full) != meta_lu:
+        print(f"  [WARN][一致性] 涨停股全集 {len(limit_up_full)} 家 ≠ meta.limit_up_count {meta_lu} 家，"
+              f"可能 fetch 取数不全或 data/ 目录陈旧，建议重新运行 fetch_data.py")
+    # 封板+炸板应 ≥ 涨停数（封板就是涨停的子集，炸板是额外触板的）
+    sealed = meta.get("sealed_count", meta.get("limit_up_count", 0))
+    broken = meta.get("broken_count", 0)
+    if sealed and sealed + broken < sealed:
+        print(f"  [WARN][一致性] 封板 {sealed} + 炸板 {broken} < 封板数本身，meta 数据异常")
+
     # 六步分析
     print("[1/6] 市场环境...")
     env = analyze_market_environment(heat, industry_quotes, meta)
 
     print("[2/6] 主线识别...")
-    lines = analyze_main_lines(industry_l2_quotes or industry_quotes, stock_top_rise, abnormal_trade, stock_detail)
+    lines = analyze_main_lines(industry_l2_quotes or industry_quotes, limit_up_full, abnormal_trade, stock_detail)
 
     print("[3/6] 核心锚点...")
     main_line_names = [m["name"] for m in lines["main_lines"]]
     # 传递 L2 标准名清单给锚点分析，确保行业匹配跟主线识别一致
     l2_std_set = set(ind.get("INDU_CLASS_NAME", "") for ind in (industry_l2_quotes or industry_quotes)
                      if ind.get("INDU_CLASS_NAME"))
-    anchors = analyze_anchor_stocks(stock_top_rise, stock_value, meta.get("limit_up_count", 0),
+    anchors = analyze_anchor_stocks(limit_up_full, stock_value, meta.get("limit_up_count", 0),
                                     main_line_names=main_line_names, stock_detail=stock_detail,
                                     l2_standard_names=l2_std_set)
 
     print("[4/6] 情绪周期...")
-    emotion = analyze_emotion_cycle(meta, stock_top_rise, abnormal_trade, heat)
+    emotion = analyze_emotion_cycle(meta, heat)
 
     print("[5/6] 持续性评估...")
     sustainability = analyze_sustainability(industry_quotes, stock_detail)

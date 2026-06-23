@@ -8,6 +8,7 @@ skills/*/scripts/.env
 
 # 中间数据
 skills/mainline-analysis/scripts/data/
+skills/mainline-analysis/scripts/data_backup_*/
 
 # 生成的报告
 A股主线识别*.md

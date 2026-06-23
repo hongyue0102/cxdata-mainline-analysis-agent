@@ -36,6 +36,7 @@ _ALLOWED_APIS = frozenset([
     "getStatTradeDateMainByCond-G",
     "getDStkValueMidByCond-G",
     "getDPubComInfo1ByCond-G",
+    "getPubInduCodeByCond-G",
     "getIndexLyricalList2ByCond-G",
     "getIndexLyricalList1ByCond-G",
     "getDStkBlockTradeByCond-G",
@@ -134,6 +135,12 @@ def fetch_all_pages(api_id: str, params: dict, show_progress: bool = False) -> l
             break
         page += 1
         time.sleep(0.1)
+    # 一致性自检：实际拉取条数必须等于 API 声明的 totalCount，
+    # 否则说明被服务端限流/截断（如 abnormal_trade 实际可能 >100 但只回 100），
+    # 静默截断会让下游『把前N条当全集』分析。差异即告警，不静默放过。
+    if total is not None and len(all_results) != total:
+        print(f"  [WARN][一致性] {api_id}: 拉取 {len(all_results)} 条 ≠ totalCount {total} 条，"
+              f"可能被服务端限流/截断，下游分析可能不全")
     return all_results
 
 
@@ -183,6 +190,43 @@ def is_limit_up(r):
 
 def is_limit_down(r):
     return r.get("PRICE_UPDOWN_TYPE_PAR") == "跌停"
+
+
+def _limit_up_price(r):
+    """计算涨停价 = ROUND(昨收 × (1 + 板块涨跌幅限制), 2)。
+    四舍五入到分，与交易所「涨停价」口径一致。"""
+    pre = safe_float(r.get("PRE_CLOSE_PRICE"))
+    if pre <= 0:
+        return None
+    threshold = _get_limit_threshold(r.get("STK_CODE"), r.get("STK_SHORT_NAME"))
+    return round(pre * (1 + threshold / 100.0), 2)
+
+
+def is_sealed(r):
+    """封板：收盘价封在涨停板上（= 接口标记的『涨停』）。
+
+    PRICE_UPDOWN_TYPE_PAR=='涨停' 即收盘价 == 涨停价，与交易所口径一致，
+    这部分都是封板成功的。"""
+    return is_limit_up(r)
+
+
+def is_broken(r):
+    """炸板：盘中最高价触及涨停价，但收盘价未封住涨停。
+
+    判定：HIGH_PRICE >= 涨停价 - 0.001 且 收盘价 < 涨停价 - 0.001。
+    （阈值 0.001 容忍浮点误差。新股/次新股 PRE_CLOSE 缺失时不算炸板。）
+
+    注意：收盘仍封在涨停板上的（is_sealed=True）不算炸板。"""
+    if is_limit_up(r):
+        return False
+    limit_price = _limit_up_price(r)
+    if not limit_price or limit_price <= 0:
+        return False
+    high = safe_float(r.get("HIGH_PRICE"))
+    close = safe_float(r.get("CLOSE_PRICE"))
+    if high <= 0 or close <= 0:
+        return False
+    return high >= limit_price - 0.001 and close < limit_price - 0.001
 
 
 # ========== 主流程 ==========
@@ -290,8 +334,17 @@ def main():
 
     all_limit_up = [r for r in valid_quotes if is_limit_up(r)]
     all_limit_down = [r for r in valid_quotes if is_limit_down(r)]
+    # 炸板股：盘中触及涨停但收盘未封住（仅在全市场行情里反推，无额外接口调用）
+    all_broken = [r for r in valid_quotes if is_broken(r)]
+    # 全市场涨停股全集（封板成功的全部，用于主线/锚点/情绪分析）
+    # 旧版只存涨幅榜前100，会丢失非涨幅靠前的涨停股，导致 103 vs 61 不一致
+    save("limit_up_full.json", all_limit_up)
+    save("limit_broken.json", all_broken)
+    # 跌停股全集：与涨停股对称存盘（当前分析仅用计数，但保留明细避免将来踩同款 bug）
+    save("limit_down_full.json", all_limit_down)
     print(f"  总成交: {len(valid_quotes)}家")
-    print(f"  涨停: {len(all_limit_up)}家")
+    print(f"  涨停(封板): {len(all_limit_up)}家")
+    print(f"  炸板(触板未封): {len(all_broken)}家")
     print(f"  跌停: {len(all_limit_down)}家")
 
     # ========================================
@@ -330,6 +383,29 @@ def main():
                             {"stkCode": code, "pageNum": "1", "pageSize": "1"})
         ind_res = ind_data.get("result", [{}])
         info = ind_res[0] if ind_res else {}
+
+        # 申万二级行业（权威口径）：
+        # INDU_CLASS_NAME_S 是申万三级名（与 getPubComInduChanSwByCond-G 一致），
+        # 用它做入参查行业代码表。该接口对同一个行业名会返回多条记录（GICS/中证/申万各一条），
+        # 必须筛选 INDU_SYS_PAR 含「申银万国」的那条，否则取到的 INDU_NAME2 是 GICS 口径
+        # （如「半导体产品与设备」），与板块行情的申万二级（「半导体」）对不上。
+        # 旧版直接用 INDU_CLASS_NAME_Q（GICS）+ 字符串包含匹配，导致 14.6% 漏归。此为根治。
+        sw_l2_name = ""
+        sw_l2_code = ""
+        sw_l3 = info.get("INDU_CLASS_NAME_S", "")
+        if sw_l3:
+            code_data = call_api("getPubInduCodeByCond-G",
+                                 {"induClassName": sw_l3, "pageNum": "1", "pageSize": "20"})
+            code_res = code_data.get("result", [])
+            # 优先取申万 2021，其次任意申万版本，最后回退有效记录
+            sw_2021 = [c for c in code_res
+                       if "申银万国" in (c.get("INDU_SYS_PAR") or "") and "2021" in (c.get("INDU_SYS_PAR") or "")]
+            sw_any = [c for c in code_res if "申银万国" in (c.get("INDU_SYS_PAR") or "")]
+            chosen = (sw_2021 or sw_any or [c for c in code_res if c.get("IS_VALID") == "是"] or code_res)
+            if chosen:
+                sw_l2_name = chosen[0].get("INDU_NAME2", "")
+                sw_l2_code = chosen[0].get("INDU_CODE2", "")
+
         pos_data = call_api("getIndexLyricalList2ByCond-G",
                             {"code": code, "indexDate": date, "pageNum": "1", "pageSize": "5"})
         neg_data = call_api("getIndexLyricalList1ByCond-G",
@@ -345,8 +421,10 @@ def main():
         return {
             "code": code,
             "name": name,
-            "sw_industry_s": info.get("INDU_CLASS_NAME_S", ""),
-            "sw_industry_q": info.get("INDU_CLASS_NAME_Q", ""),
+            "sw_industry_l2": sw_l2_name,        # 申万二级名（权威，用于主线/锚点归并）
+            "sw_industry_l2_code": sw_l2_code,   # 申万二级代码
+            "sw_industry_s": info.get("INDU_CLASS_NAME_S", ""),   # 申万三级名
+            "sw_industry_q": info.get("INDU_CLASS_NAME_Q", ""),   # GICS口径，仅参考
             "sw_industry_z": info.get("INDU_CLASS_NAME_Z", ""),
             "pos_count": pos_count,
             "neg_count": neg_count,
@@ -377,13 +455,15 @@ def main():
     meta = {
         "date": date,
         "total_stocks": len(valid_quotes),
-        "limit_up_count": len(all_limit_up),
+        "limit_up_count": len(all_limit_up),      # 涨停=封板（收盘封住）
         "limit_down_count": len(all_limit_down),
+        "sealed_count": len(all_limit_up),        # 封板数（= 涨停数）
+        "broken_count": len(all_broken),          # 炸板数（触板未封）
     }
     save("meta.json", [meta])
 
     elapsed = time.time() - t_start
-    print(f"\n=== 完成！日期: {date}, 总成交: {len(valid_quotes)}, 涨停: {len(all_limit_up)}, 跌停: {len(all_limit_down)} ===")
+    print(f"\n=== 完成！日期: {date}, 总成交: {len(valid_quotes)}, 涨停: {len(all_limit_up)}, 炸板: {len(all_broken)}, 跌停: {len(all_limit_down)} ===")
     print(f"总耗时: {elapsed:.0f}s")
 
 

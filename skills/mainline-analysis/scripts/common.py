@@ -14,6 +14,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Tuple
 
+# 凭证加解密（缓解风险2：CXDA_USER_KEY 明文存储）
+try:
+    import cred_crypto
+    _HAS_CRYPTO = True
+except ImportError:
+    _HAS_CRYPTO = False
+
 # ── Windows 编码修复 ──────────────────────────────────────────────────
 if sys.platform == "win32":
     import io
@@ -39,18 +46,33 @@ REQUEST_CHANNEL = "CAXEN"
 # ── CLI 缓存封装 ──────────────────────────────────────────────────────
 
 def _get_cli_path() -> Path:
-    """获取 cxda_cache_cli.py 路径（本地优先）"""
+    """获取 cxda_cache_cli.py 路径（本地优先）。
+
+    环境变量 CXDA_CACHE_CLI_PATH 仅在指向真实存在的 .py 文件时才采用，
+    否则回退到同目录默认值（缓解风险5：环境变量被污染指向恶意脚本）。
+    """
     env_path = os.environ.get("CXDA_CACHE_CLI_PATH")
     if env_path:
-        return Path(env_path)
+        p = Path(env_path)
+        # 校验：必须存在、是文件、扩展名为 .py（拒绝指向任意可执行/恶意路径）
+        if p.is_file() and p.suffix == ".py":
+            return p
+        # 校验失败回退默认，避免环境变量污染导致执行任意脚本
     return Path(__file__).parent / "cxda_cache_cli.py"
 
 
 def _get_python_exe() -> str:
-    """获取 Python 执行路径"""
+    """获取 Python 执行路径。
+
+    环境变量 CXDA_CACHE_PYTHON 仅在指向真实存在且可执行的文件时才采用，
+    否则回退到当前解释器（缓解风险5：环境变量被污染指向恶意程序）。
+    """
     env_python = os.environ.get("CXDA_CACHE_PYTHON")
     if env_python:
-        return env_python
+        p = Path(env_python)
+        if p.is_file() and os.access(p, os.X_OK):
+            return env_python
+        # 校验失败回退默认，避免执行任意程序
     return sys.executable
 
 
@@ -143,7 +165,15 @@ def check_terms_accepted() -> Tuple[bool, dict]:
 
 
 def save_auth(data: dict):
-    """保存认证数据到缓存（合并更新）"""
+    """保存认证数据到缓存（合并更新）。
+
+    CXDA_USER_KEY 在落盘前统一加密（缓解风险2），所有调用方（cmd_verify、
+    set_user_key 等）无需各自处理。已加密形态（带前缀）不重复加密。
+    """
+    if _HAS_CRYPTO and isinstance(data, dict) and data.get("CXDA_USER_KEY"):
+        key = data["CXDA_USER_KEY"]
+        if not cred_crypto.is_encrypted(key):
+            data = {**data, "CXDA_USER_KEY": cred_crypto.encrypt(key)}
     _cli_call("auth", "set", ["--data", json.dumps(data, ensure_ascii=False)])
 
 
@@ -177,14 +207,30 @@ def get_user_key() -> str:
 
     优先级：
     1. 环境变量 CXDA_USER_KEY
-    2. 缓存中的 CXDA_USER_KEY
+    2. 缓存中的 CXDA_USER_KEY（加密存储，读取时解密）
+
+    缓存中的 CXDA_USER_KEY 以 Fernet 密文存储（缓解风险2），
+    读取时透明解密；若为老明文数据，解密后顺带迁移为密文。
     """
     env_key = os.environ.get("CXDA_USER_KEY")
     if env_key:
         return env_key
 
     auth = get_cached_auth()
-    return auth.get("CXDA_USER_KEY", "")
+    stored = auth.get("CXDA_USER_KEY", "")
+    if not stored:
+        return ""
+    if not _HAS_CRYPTO:
+        # 无加密库时退化为明文（仅靠风险6的文件权限防护）
+        return stored
+    plaintext, needs_migration = cred_crypto.decrypt(stored)
+    if needs_migration and plaintext:
+        # 老明文数据：重新加密写回，完成迁移
+        try:
+            set_user_key(plaintext)
+        except Exception:
+            pass
+    return plaintext
 
 
 def mask_user_key(key: str) -> str:
@@ -195,7 +241,7 @@ def mask_user_key(key: str) -> str:
 
 
 def set_user_key(key: str):
-    """将 CXDA_USER_KEY 写入缓存"""
+    """将 CXDA_USER_KEY 写入缓存（加密由 save_auth 统一处理，缓解风险2）"""
     save_auth({"CXDA_USER_KEY": key})
 
 

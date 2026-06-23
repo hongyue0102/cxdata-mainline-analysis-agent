@@ -88,6 +88,48 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-23 安全扫描 6 条风险项修复
+
+客户安全扫描命中 6 条风险，逐条核实后处置如下：
+
+| # | 风险 | 真伪 | 处置 |
+|---|---|---|---|
+| 1/4 | cxda_cache_cli.py filename/skill_name 路径遍历（`../` 逃出 workspace 读写任意文件）| 真实 | `_safe_join` 统一做 resolve()+起始目录校验，逃逸即抛 ValueError；shared_read/write/delete、私域 read/write/delete/list_files 全部加捕获 |
+| 6 | 凭证文件权限过松（默认 0o644/0o755，同机用户可读）| 真实 | `mkdir` 显式 `mode=0o700` + `os.chmod` 兜底；文件写改 `_secure_write_text`（`os.open` 指定 0o600）；workspace/.shared/各 skill 目录全部收紧 |
+| 2 | CXDA_USER_KEY 明文存储 | 真实 | 新增 `cred_crypto.py`（Fernet 对称加密，PBKDF2 从机器特征派生密钥）；`save_auth` 落盘前统一加密 CXDA_USER_KEY，`get_user_key` 读取时透明解密；老明文数据首次读取自动迁移为密文；requirements 加 cryptography |
+| 5 | common.py 环境变量 `_cli_call` RCE | 误报（能改环境变量=已有本地执行权）| 仍按客户要求加固：`CXDA_CACHE_PYTHON`/`CXDA_CACHE_CLI_PATH` 必须指向真实存在且合法的文件（python 可执行/cli 为 .py），否则回退默认 |
+| 3 | query.py 参数 SQLi | 误报（参数走 HTTP GET，不碰 SQL）| 仍按客户要求加固：`parse_params` 对参数 key 做标识符白名单校验（`^[A-Za-z_][A-Za-z0-9_]*$`），value 长度上限，拒绝含特殊字符的参数名 |
+
+**验证**：6 条防护端到端测试全部通过（路径遍历拦截、权限 0o600/0o700、加密往返+老明文迁移、恶意环境变量回退、非法参数名拒绝）；正常业务调用（合法参数、正常读写、鉴权取数）不受影响。
+
+### 2026-06-23 修复申万二级行业归并 bug（14.6% 涨停股漏归）
+
+- **问题**：个股→申万二级的归并用字符串包含匹配，6-18 实测漏归 14.6%（15/103 涨停股未归入任何板块，导致主线涨停数偏少）。根因：
+  1. **取错数据源**：个股行业用 `getDPubComInfo1ByCond-G` 的 `INDU_CLASS_NAME_Q`，但那是 **GICS 口径**（如「金属与采矿」），与板块行情的申万二级（「小金属」）词面对不上
+  2. **GICS vs 申万两套体系硬凑**：`_match_l2_from_industry_name` 拿 GICS 名做字符串包含匹配申万二级，命中率天然低
+- **方案**（用对接口，根治口径错配）：
+  - **fetch_data.py** 白名单加 `getPubInduCodeByCond-G`（行业代码表）。个股查询串联：先用 `INDU_CLASS_NAME_S`（申万三级名）查该表，从返回的多条记录（GICS/中证/申万各一条）里**筛选 `INDU_SYS_PAR` 含「申银万国」+ 2021 版**的那条，取 `INDU_NAME2`（申万二级名）+ `INDU_CODE2`
+  - **analyze_data.py** 主线涨停集中度 + 锚点归并，改用 `sw_industry_l2` **精确匹配**板块行情的二级标准名，退役 `_match_l2_from_industry_name` + `SW_L3_TO_L2_KEYWORDS` 关键词表（删死代码）；加漏归自检告警
+  - **关键坑**：`getPubInduCodeByCond-G` 同一行业名返回多条不同分类体系记录，必须筛选申万那条，否则取到 GICS 的二级名（「半导体产品与设备」≠ 申万「半导体」）
+- **效果**（6-18 真实数据回归）：申万二级取到率 100%（103/103），**精确命中板块列表 100%**，漏归率 14.6%→0；主线结论修正为**小金属**（涨停6家，得分86.5），推翻此前因 GICS 错归导致的「通信设备」「半导体」误判
+- **关联**：cxdata 接口套餐权限——`getPubInduCodeByCond-G` 需授权「股票库定制套餐(largeType-254)」，否则报 10201（服务端不回退到其他套餐）
+
+### 2026-06-22 修复封板/炸板口径 bug（涨停 103 vs 封板 61 不一致）
+
+- **问题**：6-18 报告出现「涨停 103 家、封板 61 家、炸板率 0%」自相矛盾的数字，且结论误判为「资金封板坚决」。根因有三：
+  1. **取数源用错**：`analyze_data.py` 三处（主线识别/锚点选股/情绪周期）用 `stock_top_rise.json`（涨幅榜前 100）当全市场涨停股列表，里面只有 61 只涨停股，漏掉 42 只非涨幅靠前的涨停股
+  2. **炸板口径错**：用 `收盘价 < 最高价 × 0.999` 判炸板，既非交易所口径，又在数据残缺时永远输出 0%
+  3. **文案无脑**：`炸板率 == 0` 就输出「资金封板坚决」，但 0% 是数据缺失造成的假象
+- **方案**：
+  - **fetch_data.py** 新增 `_limit_up_price`（涨停价 = ROUND(昨收 × 板块限制, 2)）、`is_sealed`（封板 = 收盘封住涨停）、`is_broken`（炸板 = 盘中 `HIGH_PRICE ≥ 涨停价` 且收盘 < 涨停价，全市场行情反推，无额外接口调用）
+  - **fetch_data.py** 新增输出 `limit_up_full.json`（涨停股全集）/ `limit_broken.json`（炸板股全集）/ `limit_down_full.json`（跌停股全集，与涨停对称），meta 补 `sealed_count` / `broken_count`
+  - **analyze_data.py** 三处改用 `limit_up_full`（形参同步改名，消除「榜单当全集」误导）；封板/炸板数直接取 meta 里全市场校验值；新增数据一致性自检（全集数 ≠ meta.limit_up_count 时告警，不再静默生成矛盾报告）
+  - **analyze_data.py** 文案按封板率分三档（≥80% 坚决 / 60-80% 一般 / <60% 追涨风险高），不再无脑「坚决」
+- **关联代码质量修复**（排查同类隐患后顺带修）：
+  - **fetch_data.py** `fetch_all_pages` 加 totalCount 一致性自检：实际拉取条数 ≠ API 声明 totalCount 时告警，防止 abnormal_trade 等数据被服务端限流/截断后静默当全集用
+  - **analyze_data.py** `analyze_emotion_cycle` 删除死参数（`abnormal_trade` / `stock_top_rise` 传入但函数体不使用）
+- **效果**（6-18 真实数据回归）：封板 103、炸板 **53**、封板率 **66%**（一般），情绪评分 2.7→2.35（如实下调）；主线排序修正为通信设备（涨停6家）取代旧的半导体（涨停5家，被涨幅榜高估）
+
 ### 2026-06-17 修复安全扫描命中的 SSRF 与 XSS 风险（commit 3fff527）
 
 - **SSRF**（真实）：`query.py cmd_api` 中 `api_id` 直接拼接到 URL path，存在 path traversal 风险。加正则白名单 `^[A-Za-z0-9_-]+$` 拦截；`cmd_page_size` 同步加白名单（防御深度）

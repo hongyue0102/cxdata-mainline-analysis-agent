@@ -60,12 +60,29 @@ _DISPLAY_TZ = timezone(timedelta(hours=8))
 
 
 def parse_params(args):
-    """解析命令行参数，支持 key=value 格式"""
+    """解析命令行参数，支持 key=value 格式。
+
+    安全校验（缓解风险3）：参数 key 必须是合法标识符（字母/数字/下划线），
+    拒绝含特殊字符的 key，避免参数名注入；value 做长度上限约束。
+    注意：参数最终通过 HTTP GET query string 传给后端（requests 会做 URL 编码），
+    不接触本地 SQL，SQL 注入防护是后端职责；此处的 key 格式校验属防御性加固。
+    """
+    import re
+    _KEY_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+    _MAX_VAL_LEN = 4096
     params = {}
     for arg in args:
         if '=' in arg:
             k, v = arg.split('=', 1)
-            params[k.strip()] = v.strip()
+            k = k.strip()
+            v = v.strip()
+            if not _KEY_RE.match(k):
+                output_error(f"非法参数名（仅允许字母/数字/下划线）: {k!r}")
+                return {}
+            if len(v) > _MAX_VAL_LEN:
+                output_error(f"参数 {k} 的值超长（>{_MAX_VAL_LEN} 字符），已拒绝")
+                return {}
+            params[k] = v
     return params
 
 
