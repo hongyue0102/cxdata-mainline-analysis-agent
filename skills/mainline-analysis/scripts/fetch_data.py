@@ -220,6 +220,17 @@ def _get_board(code):
         return "main"
 
 
+def is_b_share(code):
+    """判断是否 B 股（主线分析针对上证A股，需排除B股）。
+
+    B 股代码：上交所 B 股 900 开头（前2位 90），深交所 B 股 200 开头（前2位 20）。
+    B 股也有涨跌停，若不排除会被计入全市场涨停/封板/主线统计，污染 A 股主线口径。
+    """
+    if not code:
+        return False
+    return code.startswith("90") or code.startswith("20")
+
+
 def _get_limit_threshold(code, name):
     board = _get_board(code)
     is_st = "ST" in (name or "")
@@ -377,7 +388,10 @@ def main():
     all_quotes = fetch_all_pages("getStkDayQuoByCond-G", {"tradeDate": date}, show_progress=True)
     if not all_quotes:
         print("  [ERROR] 个股行情数据为空，API 调用可能失败，后续分析结果不可靠")
-    valid_quotes = [r for r in all_quotes if r.get("PRICE_LIMIT") not in (None, "", "NaN")]
+    # 过滤：需有涨幅数据 + 排除 B 股（主线分析针对上证A股口径，B 股单独计价、波动逻辑不同）
+    valid_quotes = [r for r in all_quotes
+                    if r.get("PRICE_LIMIT") not in (None, "", "NaN")
+                    and not is_b_share(r.get("STK_CODE", ""))]
     valid_quotes.sort(key=lambda x: float(x.get("PRICE_LIMIT", 0)), reverse=True)
 
     save("stock_top_rise.json", valid_quotes[:100])
