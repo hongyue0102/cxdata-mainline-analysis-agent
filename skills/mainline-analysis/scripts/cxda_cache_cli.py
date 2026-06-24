@@ -28,6 +28,35 @@ except ImportError:
 
 # ── 工作空间探测 ──────────────────────────────────────────────────────
 
+def _validate_workspace_path(workspace: Path, source: str = "") -> Path:
+    """校验 workspace 路径合理性（缓解风险1：环境变量路径遍历）。
+
+    拒绝系统关键目录（防止以高权限运行时 chmod/mkdir 破坏 /etc /bin 等），
+    并要求路径在用户家目录下（防止越界到其他用户目录或系统区）。
+    校验失败回退默认 ~/.cxda-cache。
+    """
+    # 系统关键目录黑名单（resolve 后比较，含这些前缀的一律拒绝）
+    SYSTEM_CRITICAL = (
+        "/etc", "/bin", "/sbin", "/usr", "/boot", "/dev", "/proc", "/sys",
+        "/var", "/lib", "/lib64", "/root", "/Library", "/System",
+    )
+    home = Path.home().resolve()
+    resolved = workspace.resolve()
+    resolved_str = str(resolved)
+    # 1) 拒绝系统关键目录
+    for crit in SYSTEM_CRITICAL:
+        if resolved_str == crit or resolved_str.startswith(crit + os.sep):
+            print(f"  [WARN] 拒绝 workspace 路径 {resolved_str}（系统关键目录），"
+                  f"回退默认 ~/.cxda-cache。来源: {source}", file=sys.stderr)
+            return (Path.home() / ".cxda-cache")
+    # 2) 必须在用户家目录下（防止越界到 /tmp 公共区或其他用户目录）
+    if not resolved_str.startswith(str(home) + os.sep) and resolved_str != str(home):
+        print(f"  [WARN] 拒绝 workspace 路径 {resolved_str}（不在用户家目录下），"
+              f"回退默认 ~/.cxda-cache。来源: {source}", file=sys.stderr)
+        return (Path.home() / ".cxda-cache")
+    return resolved
+
+
 def detect_workspace() -> Path:
     """
     自动检测工作空间路径
@@ -36,11 +65,13 @@ def detect_workspace() -> Path:
     1. CXDA_CACHE_WORKSPACE 环境变量
     2. CLAUDE_WORKSPACE 环境变量
     3. 默认 ~/.cxda-cache
+
+    环境变量路径需通过 _validate_workspace_path 校验（缓解风险1）。
     """
     for env_var in ["CXDA_CACHE_WORKSPACE", "CLAUDE_WORKSPACE"]:
         path = os.environ.get(env_var)
         if path:
-            workspace = Path(path).expanduser().resolve()
+            workspace = _validate_workspace_path(Path(path).expanduser(), source=env_var)
             workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
                 os.chmod(workspace, 0o700)

@@ -88,6 +88,20 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-24 安全扫描第二批 5 条风险加固（按客户要求）
+
+客户第二轮扫描命中 5 条输入验证类风险，逐条核实后（多数为理论性/已部分加固）按客户要求全部追加防御：
+
+| # | 风险 | 加固 |
+|---|---|---|
+| 1 | detect_workspace 环境变量路径遍历 | 新增 `_validate_workspace_path`：拒绝系统关键目录（/etc /bin /usr /var 等）、要求路径在用户家目录下，否则回退默认 ~/.cxda-cache |
+| 2 | _get_cli_path RCE | 新增 `_is_path_trusted`：环境变量指向的 .py 必须在可信区域（脚本同目录/家目录/python安装目录），拒绝 /tmp 等临时目录 |
+| 3 | _get_python_exe RCE | 同上，可执行文件必须落在可信区域，否则回退 sys.executable |
+| 4 | http_get SSRF | url 白名单：必须以 BASE_URL 开头（官方 cxdata 域名），拒绝任何其他 host，防止请求导向内部/任意服务 |
+| 5 | get/save_shared_json 路径遍历 | 新增 `_validate_shared_filename`：filename 只允许字母数字下划线连字符点，拒绝含 `/` `\\` `..` 的路径（CLI 侧 _safe_join 作兜底） |
+
+**验证**：5 条防护端到端测试通过（/etc 回退、/tmp/evil.py 回退、evil.com 拒绝、../etc/passwd 拒绝且正常文件名不误伤）；完整 fetch+analyze 业务正常（记账完整、主线结论一致），加固对业务零影响
+
 ### 2026-06-24 排除 B 股（主线分析针对上证 A 股口径）
 
 - **问题**：fetch 的 `valid_quotes` 过滤只剔除无涨幅数据的股票，**未排除 B 股**。B 股（上交所 900 开头、深交所 200 开头）也有涨跌停，若不排除会被计入全市场涨停/封板/炸板/主线统计，污染 A 股主线口径。当前数据恰好无 B 股涨停属运气，属隐患。
