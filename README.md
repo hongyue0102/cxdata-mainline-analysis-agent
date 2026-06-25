@@ -88,6 +88,20 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-25 风险 1/4 终极加固：cred_crypto 改硬依赖，彻底消除“无加密分支”
+
+风险 1/4（缺 cryptography 则明文存储）此前用 `try/except ImportError` + `save_auth` 内 raise 拦截。但静态扫描器（如火山）若按模式匹配判定，看到 `except ImportError` 分支存在仍会报，不深入分析 raise 是否覆盖所有路径。为对“数据流分析”和“模式匹配”两种扫描规则都免疫，改为硬依赖：
+
+- `common.py` 删除 `try/except ImportError` 块，直接 `import cred_crypto`；缺失 cryptography 库时 `ModuleNotFoundError` 直接终止，**代码里不存在任何“无加密执行”分支**
+- 清理 `_HAS_CRYPTO` 变量及其所有死分支（save_auth / get_user_key）
+- 老明文数据读取兼容不丢：`cred_crypto.decrypt` 对无 `ENCv1:` 前缀的数据原样返回并标记迁移
+
+**改动文件**：`common.py`
+
+**验证**：`_HAS_CRYPTO`/`except ImportError` 残留为 0；新 key 加密写入、读回透明解密、老明文读取兼容 3 项回归通过
+
+**连带影响**：运行环境须 `pip install cryptography`（requirements.txt 已声明，.venv 已装）
+
 ### 2026-06-25 安全扫描第 8 条修复：私域 read/write 路径遍历（补漏）
 
 上一批已根治风险 1-7，第 8 条（cxda_cache_cli 私域 read/write 的 skill/file 参数缺路径遍历校验）当时未触及，本次补上：
