@@ -45,9 +45,23 @@ REQUEST_CHANNEL = "CAXEN"
 
 # ── CLI 缓存封装 ──────────────────────────────────────────────────────
 
+def _safe_env_path(name: str) -> str:
+    """读取并校验环境变量取值（缓解风险5：环境变量 RCE）。
+
+    仅允许常规可执行/路径字符，拒绝 shell 元字符（; | & $ ` > < 换行等）与空字节，
+    杜绝“裸 env → subprocess”模式。非法值视为未设置，回退默认值。
+    """
+    value = os.environ.get(name, "")
+    if not value:
+        return ""
+    if any(ch in value for ch in (";", "|", "&", "$", "`", ">", "<", "\n", "\r", "\0")):
+        return ""
+    return value
+
+
 def _get_cli_path() -> Path:
     """获取 cxda_cache_cli.py 路径（本地优先）"""
-    env_path = os.environ.get("CXDA_CACHE_CLI_PATH")
+    env_path = _safe_env_path("CXDA_CACHE_CLI_PATH")
     if env_path:
         return Path(env_path)
     return Path(__file__).parent / "cxda_cache_cli.py"
@@ -55,7 +69,7 @@ def _get_cli_path() -> Path:
 
 def _get_python_exe() -> str:
     """获取 Python 执行路径"""
-    env_python = os.environ.get("CXDA_CACHE_PYTHON")
+    env_python = _safe_env_path("CXDA_CACHE_PYTHON")
     if env_python:
         return env_python
     return sys.executable
@@ -70,15 +84,15 @@ def _get_workspace() -> str:
     2. CLAUDE_WORKSPACE 环境变量
     3. 默认 ~/.cxda-cache
     """
-    workspace = os.environ.get("CXDA_CACHE_WORKSPACE") \
-        or os.environ.get("CLAUDE_WORKSPACE") \
+    workspace = _safe_env_path("CXDA_CACHE_WORKSPACE") \
+        or _safe_env_path("CLAUDE_WORKSPACE") \
         or str(Path.home() / ".cxda-cache")
 
     Path(workspace).mkdir(parents=True, exist_ok=True)
     return workspace
 
 
-def _cli_call(command: str, subcommand: str = None, args: list = None, raw_output: bool = False) -> dict:
+def _cli_call(command: str, subcommand: str = None, args: list = None, raw_output: bool = False, stdin_input: str = None) -> dict:
     """
     调用 cxda_cache_cli.py CLI
 
@@ -87,9 +101,12 @@ def _cli_call(command: str, subcommand: str = None, args: list = None, raw_outpu
         subcommand: 子命令（get, set, read, write 等）
         args: 额外参数列表
         raw_output: 是否返回原始输出
+        stdin_input: 通过 stdin 传入的内容（用于传敏感数据，避免出现在进程列表，缓解风险2）
 
     Returns:
         CLI 返回的 JSON 字典
+
+    安全（缓解风险3）：异常时不把完整 cmd（可能含敏感参数）放入 error，只返回脱敏的类型信息。
     """
     args = args or []
     cmd = [_get_python_exe(), str(_get_cli_path()), command]
@@ -101,7 +118,14 @@ def _cli_call(command: str, subcommand: str = None, args: list = None, raw_outpu
     env.setdefault("CXDA_CACHE_WORKSPACE", _get_workspace())
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+        result = subprocess.run(
+            cmd,
+            input=stdin_input,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
         stdout = result.stdout.strip() if result.stdout else ""
 
         if raw_output:
@@ -113,8 +137,13 @@ def _cli_call(command: str, subcommand: str = None, args: list = None, raw_outpu
             except json.JSONDecodeError:
                 return {"success": True, "content": stdout}
         return {"success": False, "error": "Empty output"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "CLI 调用超时"}
+    except FileNotFoundError:
+        return {"success": False, "error": "CLI 可执行文件不存在"}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        # 脱敏：不返回可能含敏感参数的完整命令行，只返回异常类型名（缓解风险3）
+        return {"success": False, "error": "CLI 调用失败：{}".format(type(e).__name__)}
 
 
 # ── 认证数据读写 ──────────────────────────────────────────────────────
@@ -152,13 +181,17 @@ def check_terms_accepted() -> Tuple[bool, dict]:
 def save_auth(data: dict):
     """保存认证数据到缓存（合并更新）。
 
-    CXDA_USER_KEY 落盘前统一加密（缓解风险2：明文存储），所有调用方无需各自处理。
+    CXDA_USER_KEY 落盘前统一加密（缓解风险1/4：明文存储），所有调用方无需各自处理。
+    安全：数据通过 stdin 传给 CLI，不作为命令行参数，避免出现在进程列表（缓解风险2）；
+    未启用加密时拒绝写入 CXDA_USER_KEY，消除明文落盘代码路径。
     """
-    if _HAS_CRYPTO and isinstance(data, dict) and data.get("CXDA_USER_KEY"):
+    if isinstance(data, dict) and data.get("CXDA_USER_KEY"):
+        if not _HAS_CRYPTO:
+            raise RuntimeError("凭证加密模块不可用，拒绝以明文存储 CXDA_USER_KEY")
         key = data["CXDA_USER_KEY"]
         if not cred_crypto.is_encrypted(key):
             data = {**data, "CXDA_USER_KEY": cred_crypto.encrypt(key)}
-    _cli_call("auth", "set", ["--data", json.dumps(data, ensure_ascii=False)])
+    _cli_call("auth", "set", stdin_input=json.dumps(data, ensure_ascii=False))
 
 
 # ── 公域 JSON 文件读写（跨 Skill 共享，如会话账本） ──────────────────────
@@ -371,19 +404,33 @@ def http_get(url: str, params: dict = None, include_channel: bool = True) -> dic
     Returns:
         解析后的 JSON 数据字典
 
-    安全（缓解 SSRF）：url 必须以 BASE_URL 开头（白名单），拒绝其他 host。
+    安全（缓解风险6 SSRF）：校验 url 的 scheme/host/path，只允许官方域名且 path
+    必须以 BASE_URL 的 path 前缀开头（/cxda/），拒绝跨 path 访问（如 /cxdaevil/）。
     """
     import requests
+    from urllib.parse import urlparse
 
-    # SSRF 防护：只允许请求 BASE_URL（官方 cxdata 域名），拒绝其他
-    if not isinstance(url, str) or not url.startswith(BASE_URL):
-        raise ValueError(f"拒绝非白名单 URL 请求（仅允许 {BASE_URL}）: {url!r}")
+    # SSRF 防护：scheme/host/path 三重校验，防止绕过到同域其他 path
+    base = urlparse(BASE_URL)
+    parsed = urlparse(url) if isinstance(url, str) else None
+    if (
+        not parsed
+        or parsed.scheme != base.scheme
+        or parsed.netloc != base.netloc
+        or not parsed.path.startswith(base.path + "/")
+    ):
+        # 脱敏：不回显完整 url（可能含敏感参数，缓解风险7）
+        raise ValueError("拒绝非白名单 URL 请求（仅允许官方 cxdata 接口路径）")
 
     params = dict(params or {})
     if include_channel and REQUEST_CHANNEL:
         params["requestChannel"] = REQUEST_CHANNEL
 
-    resp = requests.get(url, params=params, headers=HEADERS, proxies=PROXIES)
+    try:
+        resp = requests.get(url, params=params, headers=HEADERS, proxies=PROXIES, timeout=30)
+    except Exception:
+        # 脱敏：不抛含 url 的原始异常（缓解风险7）
+        raise RuntimeError("网络请求失败")
 
     # 尝试 gzip + base64 解码
     try:
@@ -391,7 +438,10 @@ def http_get(url: str, params: dict = None, include_channel: bool = True) -> dic
         return data
     except Exception:
         # 非 gzip 数据，直接 JSON 解析
-        return json.loads(resp.text)
+        try:
+            return json.loads(resp.text)
+        except Exception:
+            raise RuntimeError("响应解析失败")
 
 
 # ── 输出工具 ──────────────────────────────────────────────────────────
