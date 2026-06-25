@@ -88,6 +88,19 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-25 安全扫描第 8 条修复：私域 read/write 路径遍历（补漏）
+
+上一批已根治风险 1-7，第 8 条（cxda_cache_cli 私域 read/write 的 skill/file 参数缺路径遍历校验）当时未触及，本次补上：
+
+- `cxda_cache_cli.py` `_get_file_path` 新增**双重防护**：
+  1. 入口白名单：`skill_name`/`filename` 只允许字母数字下划线连字符点，从源头拒绝 `../`、`/`、URL 编码（`%2f`/`%5c`）等逃逸字符
+  2. resolve 校验：目标路径 resolve 后必须仍位于 skill 子目录内（`relative_to`）
+- 公域 `_get_shared_path` 原有 resolve 校验保留；`subdir` 原有 `SUBDIR_TYPES` 白名单保留
+
+**改动文件**：`cxda_cache_cli.py`
+
+**验证**：11/11 逃逸变体（`../evil`、`..%2f`、`..%5c`、`a/b`、`..` 等）全部拦截；合法名（`my-skill`/`my_skill`/`skill.v2`/`data_file-1.json`）不误伤
+
 ### 2026-06-25 安全扫描 8 条风险根治（改到发源地 + 消除危险模式，含 subprocess 凭证传递）
 
 前两批（c828e5f、502309a）虽标注修复，但经核实 `save_auth`→`_cli_call`→`subprocess` 链路一直把 CXDA_USER_KEY 经命令行参数传递（ps aux 可见），风险 2/3 从未被触及；风险 1/4/5/6/7 的发源地也未真正改到位。本轮针对根因重做，并新增对 subprocess 凭证传递的处理。
