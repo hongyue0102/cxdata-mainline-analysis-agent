@@ -101,7 +101,7 @@ $PYTHON "$AUTH_SCRIPT" status
 ### 发送验证码
 
 ```bash
-$PYTHON "$AUTH_SCRIPT" send-code --phone <手机号>
+echo '{"phone":"<手机号>"}' | $PYTHON "$AUTH_SCRIPT" send-code
 ```
 
 **输出 JSON 字段：**
@@ -121,7 +121,8 @@ $PYTHON "$AUTH_SCRIPT" send-code --phone <手机号>
 ### 验证验证码
 
 ```bash
-$PYTHON "$AUTH_SCRIPT" verify --phone <完整手机号> --code <4-6位验证码>
+echo '{"phone":"<手机号>","code":"<验证码>"}' | $PYTHON "$AUTH_SCRIPT" verify
+> 手机号与验证码通过 stdin（JSON）传入，不通过命令行参数，避免暴露在进程列表（`ps aux`）。
 ```
 
 **输出 JSON 字段：**

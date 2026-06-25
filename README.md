@@ -88,6 +88,29 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-25 安全扫描 8 条风险根治（改到发源地 + 消除危险模式，含 subprocess 凭证传递）
+
+前两批（c828e5f、502309a）虽标注修复，但经核实 `save_auth`→`_cli_call`→`subprocess` 链路一直把 CXDA_USER_KEY 经命令行参数传递（ps aux 可见），风险 2/3 从未被触及；风险 1/4/5/6/7 的发源地也未真正改到位。本轮针对根因重做，并新增对 subprocess 凭证传递的处理。
+
+| # | 风险 | 本轮修复（改到发源地） |
+|---|---|---|
+| 1/4 | 缺 cryptography 则明文 | `common.py` `save_auth` 在 `_HAS_CRYPTO=False` 时**拒绝写入** CXDA_USER_KEY，消除明文落盘代码路径 |
+| 2 | 凭证经命令行传 subprocess | `cxda_cache_cli.py` `auth set --data` 改可选、缺省从 **stdin** 读；`common.py` `save_auth` 改用 `stdin_input` 传，密钥不再进 argv（ps aux 不可见） |
+| 3 | 异常消息含完整命令行 | `common.py` `_cli_call` except 分支脱敏，按异常类型返回（TimeoutExpired/FileNotFoundError/类型名），不再把含敏感参数的 cmd 放入 error |
+| 5 | 环境变量 RCE | `common.py` 新增 `_safe_env_path`，`CXDA_CACHE_PYTHON`/`CLI_PATH`/`WORKSPACE`/`CLAUDE_WORKSPACE` 取值过滤 shell 元字符 |
+| 6 | SSRF 仅 startswith 可绕 path | `common.py` `http_get` URL 校验改为 scheme/host/path 三重校验，path 必须以 `/cxda/` 开头，拒绝 `/cxdaevil/` 等同域跨 path |
+| 7 | http_get 异常堆栈泄漏 | `common.py` `http_get` 内部 catch，网络/解析异常转 RuntimeError 脱敏，不抛含 url 的原始异常 |
+| — | phone/code 命令行可见 + 输入校验 | `auth.py` send-code/verify 去掉 `--phone`/`--code` 改 stdin(JSON)；`query.py` `parse_params` 加保留字段黑名单、新增 `_validate_api_id` 白名单（cmd_api/page_size/package 入口） |
+
+**改动文件**：`common.py`、`auth.py`、`query.py`、`cxda_cache_cli.py` + `AGENT.md`、3 个 skill 的 `SKILL.md`/`auth-flow.md`（共 7 处文档同步调用方式）
+
+**验证**：5 文件语法编译通过；stdin 凭证传递（argv 不含 --data、input 收到数据）、异常脱敏（不含 secret）、SSRF host+path 双校验（合法 `/cxda/` 放行、`/cxdaevil/` 拒绝）、环境变量元字符过滤、api_id/parse_params 黑白名单、stdin phone/code 读取 7 项冒烟测试全过
+
+**连带影响（需知悉）**：
+- 风险 2 改了 CLI 接口：`cxda_cache_cli.py auth set` 现优先 stdin（`--data` 仍兼容）；`save_auth` 改用 stdin 传，上游若有直接拼 `auth set --data` 的地方需改 stdin
+- 认证调用接口变更：send-code/verify 改 stdin 传 JSON，上层 Agent 须同步（文档已改）
+- 风险 1/4 强约束：运行环境须 `pip install cryptography`，否则写 CXDA_USER_KEY 会 RuntimeError
+
 ### 2026-06-25 对齐同事官方积分机制（jsonl 追加日志）+ 保留全部安全加固
 
 同事 6-24 提供官方最新四件套（query/common/cxda_cache_cli/auth），积分统计采用更优的 **jsonl 追加日志机制**（取代我们旧的 JSON 读改写 + _ledger_lock 文件锁）。本次对齐官方机制，同时保留我们之前做的全部安全加固。

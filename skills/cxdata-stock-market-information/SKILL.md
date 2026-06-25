@@ -96,8 +96,9 @@ $PYTHON "$AUTH_SCRIPT" status
 - `authenticated: false` → 按 `references/auth-flow.md`「认证流程」章节，引导用户通过手机号验证码登录：
 
 ```bash
-$PYTHON "$AUTH_SCRIPT" send-code --phone <手机号>
-$PYTHON "$AUTH_SCRIPT" verify --phone <手机号> --code <验证码>
+echo '{"phone":"<手机号>"}' | $PYTHON "$AUTH_SCRIPT" send-code
+echo '{"phone":"<手机号>","code":"<验证码>"}' | $PYTHON "$AUTH_SCRIPT" verify
+> 手机号与验证码通过 stdin（JSON）传入，不通过命令行参数，避免暴露在进程列表（`ps aux`）。
 ```
 
 > **安全提示**：`status` 输出的 `CXDA_USER_KEY` 已脱敏（仅显示前4后4字符），不要向用户展示或记录该字段。
