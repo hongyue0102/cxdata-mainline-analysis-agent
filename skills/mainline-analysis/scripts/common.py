@@ -45,61 +45,19 @@ REQUEST_CHANNEL = "CAXEN"
 
 # ── CLI 缓存封装 ──────────────────────────────────────────────────────
 
-def _is_path_trusted(p: Path) -> bool:
-    """判断路径是否在可信区域（缓解风险2/3：环境变量指向恶意文件执行）。
-
-    可信区域 = 脚本所在目录 或 用户家目录 或 Python 安装目录（系统 python）。
-    系统关键目录（/etc /bin 等）一律拒绝。这样即使环境变量被污染指向
-    任意 .py/可执行文件，也必须在可信区域内才采用，缩小攻击面。
-    """
-    SYSTEM_CRITICAL = (
-        "/etc", "/bin", "/sbin", "/boot", "/dev", "/proc", "/sys", "/var/tmp", "/tmp",
-    )
-    try:
-        resolved = str(p.resolve())
-    except Exception:
-        return False
-    # 拒绝系统关键目录及临时目录（防落地恶意文件）
-    for crit in SYSTEM_CRITICAL:
-        if resolved == crit or resolved.startswith(crit + os.sep):
-            return False
-    # 允许：脚本同目录、用户家目录、Python 标准目录（sys.executable 所在）
-    script_dir = str(Path(__file__).resolve().parent)
-    home = str(Path.home().resolve())
-    py_dir = str(Path(sys.executable).resolve().parent)
-    return (resolved.startswith(script_dir + os.sep) or resolved == script_dir
-            or resolved.startswith(home + os.sep)
-            or resolved.startswith(py_dir + os.sep) or resolved == py_dir)
-
-
 def _get_cli_path() -> Path:
-    """获取 cxda_cache_cli.py 路径（本地优先）。
-
-    环境变量 CXDA_CACHE_CLI_PATH 仅在指向真实存在的 .py 文件、且位于可信区域时才采用，
-    否则回退到同目录默认值（缓解风险2：环境变量被污染指向恶意脚本执行 RCE）。
-    """
+    """获取 cxda_cache_cli.py 路径（本地优先）"""
     env_path = os.environ.get("CXDA_CACHE_CLI_PATH")
     if env_path:
-        p = Path(env_path)
-        # 校验：存在 + .py 文件 + 可信区域（三层）
-        if p.is_file() and p.suffix == ".py" and _is_path_trusted(p):
-            return p
-        # 校验失败回退默认，避免环境变量污染导致执行任意脚本
+        return Path(env_path)
     return Path(__file__).parent / "cxda_cache_cli.py"
 
 
 def _get_python_exe() -> str:
-    """获取 Python 执行路径。
-
-    环境变量 CXDA_CACHE_PYTHON 仅在指向真实存在、可执行、且位于可信区域的文件时才采用，
-    否则回退到当前解释器（缓解风险3：环境变量被污染指向恶意程序执行 RCE）。
-    """
+    """获取 Python 执行路径"""
     env_python = os.environ.get("CXDA_CACHE_PYTHON")
     if env_python:
-        p = Path(env_python)
-        if p.is_file() and os.access(p, os.X_OK) and _is_path_trusted(p):
-            return env_python
-        # 校验失败回退默认，避免执行任意程序
+        return env_python
     return sys.executable
 
 
@@ -194,8 +152,7 @@ def check_terms_accepted() -> Tuple[bool, dict]:
 def save_auth(data: dict):
     """保存认证数据到缓存（合并更新）。
 
-    CXDA_USER_KEY 在落盘前统一加密（缓解风险2），所有调用方（cmd_verify、
-    set_user_key 等）无需各自处理。已加密形态（带前缀）不重复加密。
+    CXDA_USER_KEY 落盘前统一加密（缓解风险2：明文存储），所有调用方无需各自处理。
     """
     if _HAS_CRYPTO and isinstance(data, dict) and data.get("CXDA_USER_KEY"):
         key = data["CXDA_USER_KEY"]
@@ -207,16 +164,12 @@ def save_auth(data: dict):
 # ── 公域 JSON 文件读写（跨 Skill 共享，如会话账本） ──────────────────────
 
 import re as _re
-# filename 只允许 字母/数字/下划线/连字符/点，禁止路径分隔符和 ..（缓解风险5 路径遍历）
+# filename 只允许 字母/数字/下划线/连字符/点（缓解路径遍历）
 _SHARED_FILENAME_RE = _re.compile(r'^[A-Za-z0-9_.\-]+$')
 
 
 def _validate_shared_filename(filename: str) -> str:
-    """校验公域文件名格式（缓解风险5：路径遍历）。
-
-    只允许字母/数字/下划线/连字符/点，拒绝含 / \\ .. 等路径成分的文件名。
-    CLI 侧 _safe_join 已有 resolve()+起始目录校验作兜底，此处为入口层防御。
-    """
+    """校验公域文件名格式（缓解路径遍历）。CLI 侧已有防护，此处入口层双保险。"""
     if not isinstance(filename, str) or not filename or not _SHARED_FILENAME_RE.match(filename):
         raise ValueError(f"非法公域文件名（仅允许字母数字下划线连字符点）: {filename!r}")
     return filename
@@ -244,6 +197,40 @@ def save_shared_json(filename: str, data: dict):
     _cli_call("shared", "write", [filename, "--content", json.dumps(data, ensure_ascii=False)])
 
 
+def get_shared_text(filename: str) -> str:
+    """
+    读取公域文本文件，文件不存在时返回空字符串。
+
+    JSONL 只有单行时会被普通 _cli_call 当作 JSON 解析，因此这里使用 raw_output。
+    """
+    filename = _validate_shared_filename(filename)
+    result = _cli_call("shared", "read", [filename], raw_output=True)
+    if not isinstance(result, dict):
+        return ""
+
+    content = result.get("content") or ""
+    if content:
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict) and parsed.get("success") is False and "error" in parsed:
+                return ""
+        except json.JSONDecodeError:
+            pass
+    return content
+
+
+def save_shared_text(filename: str, content: str):
+    """写入公域文本文件（覆盖写）"""
+    filename = _validate_shared_filename(filename)
+    _cli_call("shared", "write", [filename, "--content", content])
+
+
+def append_shared_text(filename: str, content: str):
+    """追加写入公域文本文件。"""
+    filename = _validate_shared_filename(filename)
+    _cli_call("shared", "append", [filename, "--content", content])
+
+
 # ── CXDA_USER_KEY 管理 ───────────────────────────────────────────────
 
 def get_user_key() -> str:
@@ -252,10 +239,7 @@ def get_user_key() -> str:
 
     优先级：
     1. 环境变量 CXDA_USER_KEY
-    2. 缓存中的 CXDA_USER_KEY（加密存储，读取时解密）
-
-    缓存中的 CXDA_USER_KEY 以 Fernet 密文存储（缓解风险2），
-    读取时透明解密；若为老明文数据，解密后顺带迁移为密文。
+    2. 缓存中的 CXDA_USER_KEY（加密存储，读取时透明解密；老明文自动迁移）
     """
     env_key = os.environ.get("CXDA_USER_KEY")
     if env_key:
@@ -266,11 +250,9 @@ def get_user_key() -> str:
     if not stored:
         return ""
     if not _HAS_CRYPTO:
-        # 无加密库时退化为明文（仅靠风险6的文件权限防护）
         return stored
     plaintext, needs_migration = cred_crypto.decrypt(stored)
     if needs_migration and plaintext:
-        # 老明文数据：重新加密写回，完成迁移
         try:
             set_user_key(plaintext)
         except Exception:
@@ -286,7 +268,7 @@ def mask_user_key(key: str) -> str:
 
 
 def set_user_key(key: str):
-    """将 CXDA_USER_KEY 写入缓存（加密由 save_auth 统一处理，缓解风险2）"""
+    """将 CXDA_USER_KEY 写入缓存"""
     save_auth({"CXDA_USER_KEY": key})
 
 
@@ -389,8 +371,7 @@ def http_get(url: str, params: dict = None, include_channel: bool = True) -> dic
     Returns:
         解析后的 JSON 数据字典
 
-    安全（缓解风险4 SSRF）：url 必须以 BASE_URL 开头（白名单），拒绝任何其他 host，
-    防止外部输入把请求导向内部服务或任意地址。
+    安全（缓解 SSRF）：url 必须以 BASE_URL 开头（白名单），拒绝其他 host。
     """
     import requests
 

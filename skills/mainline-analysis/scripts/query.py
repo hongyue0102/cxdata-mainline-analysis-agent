@@ -15,17 +15,11 @@ CXDA Skill - 统一查询脚本
 
 import argparse
 import json
+import re
 import sys
-from contextlib import contextmanager
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-# fcntl 仅 Unix 可用，Windows 下记账锁退化为无锁（单进程场景无影响）
-try:
-    import fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -33,7 +27,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from common import (
     BASE_URL,
-    REQUEST_CHANNEL,
     ensure_token,
     http_get,
     get_user_key,
@@ -42,8 +35,9 @@ from common import (
     output_error,
     get_shared_json,
     save_shared_json,
-    PROXIES,
-    HEADERS,
+    get_shared_text,
+    save_shared_text,
+    append_shared_text,
 )
 
 
@@ -52,8 +46,11 @@ from common import (
 # 接口成功的返回码
 SUCCESS_CODE = "10000"
 
-# 公域会话账本文件（账户级，跨 Skill 共享）
+# 公域会话账本文件（账户级，跨 Skill 共享，保存会话元数据）
 SESSION_LEDGER_FILE = "cxda_session_ledger.json"
+
+# 公域计费调用日志（账户级，跨 Skill 共享，每行一个 JSON 调用记录）
+SESSION_CALLS_LOG_FILE = "cxda_session_calls.jsonl"
 
 # 兜底：距上次计费调用超过该分钟数，视为新会话（防止 Agent 未显式 start）
 SESSION_IDLE_MINUTES = 30
@@ -65,61 +62,16 @@ CONFIRMATION_REQUIRED_STATUS = "confirmation_required"
 
 _TIME_FMT = "%Y-%m-%d %H:%M:%S"
 _DISPLAY_TZ = timezone(timedelta(hours=8))
-
-
-@contextmanager
-def _ledger_lock():
-    """账本文件锁：保护「读-改-写」整个临界区，防止并发 subprocess 互相覆盖。
-
-    并发调用（如 fetch_data 的 ThreadPoolExecutor）时，多个 query.py 进程同时
-    「读账本→追加→写账本」，若只锁写不锁读，后写进程会覆盖先写进程的记录，
-    导致积分记账大量丢失。此锁对整个临界区加排他锁（LOCK_EX）。
-    Windows 无 fcntl，退化为无锁（单进程或低并发场景无影响）。
-    """
-    if not _HAS_FCNTL:
-        yield
-        return
-    # 锁文件与账本同目录，固定名（不含敏感数据，仅作锁用途）
-    lock_path = Path.home() / ".cxda-cache" / ".shared" / ".session_ledger.lock"
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    f = open(lock_path, "w")
-    try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    finally:
-        f.close()
+_PAGE_SIZE_CACHE = None
 
 
 def parse_params(args):
-    """解析命令行参数，支持 key=value 格式。
-
-    安全校验（缓解风险3）：参数 key 必须是合法标识符（字母/数字/下划线），
-    拒绝含特殊字符的 key，避免参数名注入；value 做长度上限约束。
-    注意：参数最终通过 HTTP GET query string 传给后端（requests 会做 URL 编码），
-    不接触本地 SQL，SQL 注入防护是后端职责；此处的 key 格式校验属防御性加固。
-    """
-    import re
-    _KEY_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
-    _MAX_VAL_LEN = 4096
+    """解析命令行参数，支持 key=value 格式"""
     params = {}
     for arg in args:
         if '=' in arg:
             k, v = arg.split('=', 1)
-            k = k.strip()
-            v = v.strip()
-            if not _KEY_RE.match(k):
-                output_error(f"非法参数名（仅允许字母/数字/下划线）: {k!r}")
-                return {}
-            if len(v) > _MAX_VAL_LEN:
-                output_error(f"参数 {k} 的值超长（>{_MAX_VAL_LEN} 字符），已拒绝")
-                return {}
-            params[k] = v
+            params[k.strip()] = v.strip()
     return params
 
 
@@ -168,10 +120,10 @@ def _has_display_value(value):
 
 def _new_ledger(now):
     return {
+        "session_id": uuid.uuid4().hex,
         "session_start": now.strftime(_TIME_FMT),
         "started_ts": now.timestamp(),
         "last_call_ts": now.timestamp(),
-        "calls": [],
         "requires_confirmation": False,
         "confirmed_after_50": False,
         "confirmation_required_at_count": None,
@@ -180,17 +132,97 @@ def _new_ledger(now):
 
 
 def _ensure_ledger_confirmation_state(ledger):
-    ledger.setdefault("requires_confirmation", False)
-    ledger.setdefault("confirmed_after_50", False)
-    ledger.setdefault("confirmation_required_at_count", None)
-    ledger.setdefault("confirmed_at", None)
-    return ledger
+    changed = False
+    for key, default in (
+        ("requires_confirmation", False),
+        ("confirmed_after_50", False),
+        ("confirmation_required_at_count", None),
+        ("confirmed_at", None),
+    ):
+        if key not in ledger:
+            ledger[key] = default
+            changed = True
+
+    if not ledger.get("session_id"):
+        ledger["session_id"] = uuid.uuid4().hex
+        changed = True
+
+    return changed
 
 
-def _is_ledger_idle_expired(ledger, now):
-    last_ts = ledger.get("last_call_ts") if isinstance(ledger, dict) else None
-    if last_ts is None:
+def _clear_session_calls_log():
+    save_shared_text(SESSION_CALLS_LOG_FILE, "")
+
+
+def _read_session_calls_log(session_id=None):
+    calls = []
+    content = get_shared_text(SESSION_CALLS_LOG_FILE)
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            call = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(call, dict):
+            continue
+        if session_id and call.get("session_id") != session_id:
+            continue
+        calls.append(call)
+    return calls
+
+
+def _get_ledger_calls(ledger):
+    if not isinstance(ledger, dict):
+        return []
+
+    calls = []
+    legacy_calls = ledger.get("calls")
+    if isinstance(legacy_calls, list):
+        calls.extend(call for call in legacy_calls if isinstance(call, dict))
+
+    calls.extend(_read_session_calls_log(ledger.get("session_id")))
+    return calls
+
+
+def _call_timestamp(call):
+    ts = call.get("ts") if isinstance(call, dict) else None
+    if ts is not None and not isinstance(ts, bool):
+        try:
+            return float(ts)
+        except (ValueError, TypeError):
+            pass
+
+    text = call.get("time") if isinstance(call, dict) else None
+    if isinstance(text, str) and text.strip():
+        try:
+            return datetime.strptime(text.strip(), _TIME_FMT).replace(tzinfo=_DISPLAY_TZ).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _format_session_call(call):
+    return {
+        "time": call.get("time", "-"),
+        "api_id": call.get("api_id", ""),
+        "consumed": call.get("consumed"),
+    }
+
+
+def _is_ledger_idle_expired(ledger, now, calls=None):
+    if not isinstance(ledger, dict):
         return False
+
+    last_ts = None
+    for call in calls or []:
+        call_ts = _call_timestamp(call)
+        if call_ts is not None and (last_ts is None or call_ts > last_ts):
+            last_ts = call_ts
+
+    if last_ts is None:
+        last_ts = ledger.get("last_call_ts") or ledger.get("started_ts")
     try:
         return (now.timestamp() - float(last_ts)) > SESSION_IDLE_MINUTES * 60
     except (ValueError, TypeError):
@@ -199,14 +231,24 @@ def _is_ledger_idle_expired(ledger, now):
 
 def _get_active_ledger(now):
     ledger = get_shared_json(SESSION_LEDGER_FILE)
-    calls = ledger.get("calls") if isinstance(ledger, dict) else None
 
     # 无账本 / 空账本 / 空闲超时 → 开新会话
-    if not isinstance(calls, list) or _is_ledger_idle_expired(ledger, now):
+    if not isinstance(ledger, dict) or not ledger:
         ledger = _new_ledger(now)
-        calls = ledger["calls"]
-    else:
-        _ensure_ledger_confirmation_state(ledger)
+        _clear_session_calls_log()
+        save_shared_json(SESSION_LEDGER_FILE, ledger)
+        return ledger, []
+
+    changed = _ensure_ledger_confirmation_state(ledger)
+    calls = _get_ledger_calls(ledger)
+    if _is_ledger_idle_expired(ledger, now, calls):
+        ledger = _new_ledger(now)
+        _clear_session_calls_log()
+        save_shared_json(SESSION_LEDGER_FILE, ledger)
+        return ledger, []
+
+    if changed:
+        save_shared_json(SESSION_LEDGER_FILE, ledger)
 
     return ledger, calls
 
@@ -217,17 +259,15 @@ def _guard_before_billable_api_call():
     已有 50 次成功计费调用且尚未确认时，暂停而不调用接口，避免产生第 51 次消耗。
     """
     now = datetime.now()
-    # 加锁：并发时多个进程同时检查 call_count 会导致超过 50 次才触发，锁保证计数准确
-    with _ledger_lock():
-        ledger, calls = _get_active_ledger(now)
-        call_count = len(calls)
-        if call_count < BILLABLE_CALL_CONFIRMATION_THRESHOLD or ledger.get("confirmed_after_50") is True:
-            return
+    ledger, calls = _get_active_ledger(now)
+    call_count = len(calls)
+    if call_count < BILLABLE_CALL_CONFIRMATION_THRESHOLD or ledger.get("confirmed_after_50") is True:
+        return
 
-        ledger["requires_confirmation"] = True
-        ledger["confirmation_required_at_count"] = call_count
-        save_shared_json(SESSION_LEDGER_FILE, ledger)
-        return call_count
+    ledger["requires_confirmation"] = True
+    ledger["confirmation_required_at_count"] = call_count
+    save_shared_json(SESSION_LEDGER_FILE, ledger)
+    return call_count
 
 
 def _record_call_if_billable(api_id, data):
@@ -245,18 +285,18 @@ def _record_call_if_billable(api_id, data):
             return
 
         now = datetime.now()
-        # 加锁保护「读-改-写」整个临界区，防止并发 subprocess 互相覆盖导致记账丢失
-        with _ledger_lock():
-            ledger, calls = _get_active_ledger(now)
-
-            calls.append({
-                "time": now.strftime(_TIME_FMT),
-                "api_id": api_id,
-                "consumed": consumed,
-            })
-            ledger["calls"] = calls
-            ledger["last_call_ts"] = now.timestamp()
-            save_shared_json(SESSION_LEDGER_FILE, ledger)
+        ledger, _calls = _get_active_ledger(now)
+        call = {
+            "session_id": ledger.get("session_id"),
+            "ts": now.timestamp(),
+            "time": now.strftime(_TIME_FMT),
+            "api_id": api_id,
+            "consumed": consumed,
+        }
+        append_shared_text(
+            SESSION_CALLS_LOG_FILE,
+            json.dumps(call, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
     except Exception:
         # 记账为旁路逻辑，任何异常都不应影响接口数据返回
         pass
@@ -270,7 +310,6 @@ def _format_package_item(item):
         "package_id": item.get("wsPackageId", ""),
         "package_name": item.get("packageName", "-"),
         "package_code": item.get("packageCode", ""),
-        "source_type": item.get("sourceType", ""),
         "status": item.get("status", ""),
         "valid_start": _format_timestamp(item.get("validStartTime")),
         "valid_end": _format_timestamp(item.get("validEndTime")),
@@ -331,7 +370,6 @@ def _format_session_package(item):
         _has_display_value(balance) and _has_display_value(total_money)
     ) else ""
     return {
-        "source_type": item.get("source_type", ""),
         "package_name": item.get("package_name", "-"),
         "balance": balance,
         "total_money": total_money,
@@ -340,6 +378,79 @@ def _format_session_package(item):
         "day_money": item.get("day_money", ""),
         "valid_end": item.get("valid_end", "-"),
     }
+
+
+# ── 单次运行内接口最大分页缓存 ────────────────────────────────────────
+
+def _normalize_max_page_size(value):
+    """将 maxPageSize 转成正整数，无法识别时返回 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        text = str(value).strip()
+        if text == "":
+            return None
+        number = int(float(text))
+        return number if number > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _load_page_size_cache():
+    """读取本进程内接口最大分页缓存。"""
+    global _PAGE_SIZE_CACHE
+    if not isinstance(_PAGE_SIZE_CACHE, dict):
+        _PAGE_SIZE_CACHE = {}
+    return _PAGE_SIZE_CACHE
+
+
+def _fetch_api_limit_setting(api_id):
+    """查询接口分页大小限制。"""
+    user_key = get_user_key()
+    if not user_key:
+        raise RuntimeError("未找到 CXDA_USER_KEY，请先通过 auth.py 完成认证")
+
+    return http_get(
+        f"{BASE_URL}/mall/api_getApiLimitSetting.htm",
+        params={"userKey": user_key, "apiMain": api_id}
+    )
+
+
+def _get_api_max_page_size(api_id):
+    """获取接口最大分页；同一进程内优先复用缓存，避免一次运行中重复查询。"""
+    cache = _load_page_size_cache()
+    if api_id in cache:
+        return cache[api_id]
+
+    data = _fetch_api_limit_setting(api_id)
+    max_page_size = _normalize_max_page_size(data.get("maxPageSize") if isinstance(data, dict) else None)
+    if max_page_size is None:
+        msg = data.get("msg") if isinstance(data, dict) else ""
+        raise RuntimeError("查询接口最大分页失败：{}".format(msg or "未返回有效 maxPageSize"))
+
+    cache[api_id] = max_page_size
+    return max_page_size
+
+
+def _cache_api_max_page_size(api_id, data):
+    """page-size 子命令查询成功后同步到本进程内缓存。"""
+    max_page_size = _normalize_max_page_size(data.get("maxPageSize") if isinstance(data, dict) else None)
+    if max_page_size is None:
+        return
+
+    cache = _load_page_size_cache()
+    cache[api_id] = max_page_size
+
+
+def _apply_default_page_size(api_id, params):
+    """未显式传 pageSize 时，自动查询并使用该接口的 maxPageSize。"""
+    normalized_params = dict(params or {})
+    page_size = normalized_params.get("pageSize")
+    if page_size is not None and str(page_size).strip() != "":
+        return normalized_params
+
+    normalized_params["pageSize"] = str(_get_api_max_page_size(api_id))
+    return normalized_params
 
 
 # ── 子命令：api（业务数据接口查询）──────────────────────────────────────
@@ -351,15 +462,6 @@ def cmd_api(api_id, params):
     认证方式：authtoken（自动从缓存获取或刷新）
     响应格式：gzip + base64 编码
     """
-    # 安全校验：api_id 直接拼接到 URL path，必须严格限制为合法接口名格式
-    # 防止 path traversal 攻击（如 api_id="../../admin/users" 访问内部端点）
-    import re
-    if not isinstance(api_id, str) or not re.match(r"^[A-Za-z0-9_-]+$", api_id):
-        output_error(
-            "非法的 api_id：{!r}（只允许字母、数字、下划线、短横线）".format(api_id)
-        )
-        return
-
     accepted, error_response = check_terms_accepted()
     if not accepted:
         output_json(error_response)
@@ -376,6 +478,7 @@ def cmd_api(api_id, params):
             })
             return
 
+        params = _apply_default_page_size(api_id, params)
         token = ensure_token()
 
         request_params = {"authtoken": token}
@@ -414,6 +517,7 @@ def cmd_session(action):
 
     if action == "start":
         ledger = _new_ledger(now)
+        _clear_session_calls_log()
         save_shared_json(SESSION_LEDGER_FILE, ledger)
         output_json({
             "success": True,
@@ -424,12 +528,13 @@ def cmd_session(action):
 
     if action == "reset":
         save_shared_json(SESSION_LEDGER_FILE, {})
+        _clear_session_calls_log()
         output_json({"success": True, "message": "会话账本已清空"})
         return
 
     if action == "confirm":
         ledger = get_shared_json(SESSION_LEDGER_FILE)
-        if not isinstance(ledger, dict) or not isinstance(ledger.get("calls"), list):
+        if not isinstance(ledger, dict) or not ledger:
             output_json({
                 "success": False,
                 "status": "confirmation_not_required",
@@ -437,8 +542,9 @@ def cmd_session(action):
             })
             return
 
-        _ensure_ledger_confirmation_state(ledger)
-        calls = ledger["calls"]
+        if _ensure_ledger_confirmation_state(ledger):
+            save_shared_json(SESSION_LEDGER_FILE, ledger)
+        calls = _get_ledger_calls(ledger)
         if len(calls) < BILLABLE_CALL_CONFIRMATION_THRESHOLD:
             output_json({
                 "success": False,
@@ -463,7 +569,8 @@ def cmd_session(action):
 
     # summary
     ledger = get_shared_json(SESSION_LEDGER_FILE)
-    calls = ledger.get("calls", []) if isinstance(ledger, dict) else []
+    calls = _get_ledger_calls(ledger)
+    visible_calls = [_format_session_call(call) for call in calls]
     total_consumed = 0
     for call in calls:
         num = _to_number(call.get("consumed"))
@@ -485,7 +592,7 @@ def cmd_session(action):
         "session_start": ledger.get("session_start") if isinstance(ledger, dict) else None,
         "call_count": len(calls),
         "total_consumed": total_consumed,
-        "calls": calls,
+        "calls": visible_calls,
         "package_count": len(packages),
         "packages": packages,
         "package_error": None if str(package_result.get("code")) == SUCCESS_CODE else package_result.get("msg"),
@@ -500,14 +607,6 @@ def cmd_page_size(api_id):
 
     认证方式：userKey
     """
-    # 安全校验：与 cmd_api 保持一致的 api_id 白名单
-    import re
-    if not isinstance(api_id, str) or not re.match(r"^[A-Za-z0-9_-]+$", api_id):
-        output_error(
-            "非法的 api_id：{!r}（只允许字母、数字、下划线、短横线）".format(api_id)
-        )
-        return
-
     accepted, error_response = check_terms_accepted()
     if not accepted:
         output_json(error_response)
@@ -519,18 +618,8 @@ def cmd_page_size(api_id):
         return
 
     try:
-        import requests
-
-        params = {"userKey": user_key, "apiMain": api_id}
-        if REQUEST_CHANNEL:
-            params["requestChannel"] = REQUEST_CHANNEL
-        resp = requests.get(
-            f"{BASE_URL}/mall/api_getApiLimitSetting.htm",
-            params=params,
-            headers=HEADERS,
-            proxies=PROXIES
-        )
-        data = resp.json()
+        data = _fetch_api_limit_setting(api_id)
+        _cache_api_max_page_size(api_id, data)
         output_json(data)
     except Exception as e:
         output_error(str(e))
@@ -544,6 +633,12 @@ def cmd_package(api_main=""):
 
     认证方式：userKey
     """
+    # 安全校验（缓解 SQLi）：api_main 白名单，拒绝特殊字符/注入 payload
+    if api_main and not re.match(r"^[A-Za-z0-9_-]+$", api_main):
+        output_json({"code": "10400", "msg": f"非法 api-main 参数: {api_main!r}",
+                     "package_count": 0, "packages": []})
+        return
+
     accepted, error_response = check_terms_accepted()
     if not accepted:
         output_json(error_response)
@@ -588,7 +683,7 @@ def main():
     示例：
       python query.py api getStkBasicInfoByCond-K stkCode=600519
       python query.py api getCooWineCateDailQuoByWineName wineName=飞天茅台
-      python query.py api getCooWineCateDailQuoByWineName wineName=飞天茅台 pageNum=1 pageSize=10
+      python query.py api getCooWineCateDailQuoByWineName wineName=飞天茅台 pageNum=1
 
     输出 JSON 格式：
       成功 → 接口返回的业务数据（JSON）
@@ -624,7 +719,7 @@ def main():
     输出 JSON 格式：
       {"code": "10000", "msg": "返回权限清单成功", "package_count": 1, "packages": [{...}]}
       package 命令只返回脚本格式化后的 packages，避免与后端原始 data 重复。
-      每个 packages 项包含：relation_id, user_id, package_id, package_name, package_code, source_type, status, valid_start, valid_end, total_money, balance, day_balance, day_money
+      每个 packages 项包含：relation_id, user_id, package_id, package_name, package_code, status, valid_start, valid_end, total_money, balance, day_balance, day_money
         """
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -639,11 +734,12 @@ def main():
 示例：
   python query.py api getStkBasicInfoByCond-K stkCode=600519
   python query.py api getCooWineCateDailQuoByWineName wineName=飞天茅台
-  python query.py api getCooWineCateDailQuoByWineName wineName=飞天茅台 pageNum=1 pageSize=10
+  python query.py api getCooWineCateDailQuoByWineName wineName=飞天茅台 pageNum=1
 
 说明：
   - API_ID 为接口访问标识，由 Skill 的 SKILL.md 提供
   - 查询参数以 key=value 格式传入，支持多个参数
+  - 未传 pageSize 时自动查询并使用该接口的 maxPageSize；CLI 仍支持按需显式传入 pageSize
   - authtoken 由脚本自动管理，无需手动传入
   - 返回数据自动解码（gzip+base64），直接输出 JSON
   - 前置条件：用户已完成认证（python auth.py status 返回 authenticated=true）
@@ -664,7 +760,7 @@ def main():
 
 说明：
   - 返回该接口每次请求允许的最大返回条数
-  - 用于在调用 api 子命令时确定合适的 pageSize 参数值
+  - api 子命令会自动查询 maxPageSize；本命令仅用于排查或确认分页限制
   - 前置条件：用户已完成认证（python auth.py status 返回 authenticated=true）
         """
     )
@@ -685,7 +781,7 @@ def main():
   - 查询用户已开通的套餐清单及额度信息
   - 自动从缓存读取 CXDA_USER_KEY，无需手动传入
   - 传入 --api-main 可筛选只包含指定接口的套餐
-  - 每个套餐包含：套餐关系ID、用户ID、套餐ID、套餐名称、套餐编码、来源类型、状态、有效期、总积分、剩余积分、每日积分、每日剩余积分
+  - 每个套餐包含：套餐关系ID、用户ID、套餐ID、套餐名称、套餐编码、状态、有效期、总积分、剩余积分、每日积分、每日剩余积分
   - valid_start、valid_end 固定输出为北京时间 yyyy-MM-dd HH:mm:ss
         """
     )
@@ -709,7 +805,7 @@ def main():
   - 当前会话已有50次成功计费调用且未确认时，api 会在调用前返回 confirmation_required
   - 用户确认继续后，先执行 session confirm，再继续 api 调用
   - summary 返回 call_count（会话调用接口数量）、total_consumed（本次会话消耗合计）、calls（明细）
-  - summary 同时返回 packages，每个套餐包含：source_type、package_name、balance、total_money、integral、day_balance、day_money、valid_end
+  - summary 同时返回 packages，每个套餐包含：package_name、balance、total_money、integral、day_balance、day_money、valid_end
   - 不同套餐的剩余积分不能混合合计，必须逐套餐展示
         """
     )

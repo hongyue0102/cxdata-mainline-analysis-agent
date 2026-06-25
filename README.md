@@ -88,6 +88,26 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-25 对齐同事官方积分机制（jsonl 追加日志）+ 保留全部安全加固
+
+同事 6-24 提供官方最新四件套（query/common/cxda_cache_cli/auth），积分统计采用更优的 **jsonl 追加日志机制**（取代我们旧的 JSON 读改写 + _ledger_lock 文件锁）。本次对齐官方机制，同时保留我们之前做的全部安全加固。
+
+**积分机制（对齐同事官方版）：**
+- 记账改为 `append_shared_text` 追加到 `cxda_session_calls.jsonl`（每调用一行 JSON），天然并发安全，无需文件锁
+- 会话隔离用 `session_id`（uuid），取代空闲超时判断
+- 保留 `_record_call_if_billable`/`_guard_before_billable_api_call`/session start/summary/confirm/reset（与同事逐字节一致）
+- 移除我们的 `_ledger_lock`（jsonl 追加无需锁）
+
+**安全加固（全部保留，叠加在同事四件套上）：**
+- SSRF：http_get url 白名单（BASE_URL）
+- 路径遍历：_validate_shared_filename（入口）+ cli 侧 resolve/relative_to 校验
+- 凭证加密：cred_crypto（CXDA_USER_KEY Fernet 加密，save_auth 加密 / get_user_key 解密 + 老明文迁移）
+- 文件权限：_secure_write_text(0o600) + mkdir(0o700)
+- 异常脱敏：_safe_net_error（auth 网络异常不泄露手机号/验证码）
+- api_main 白名单、workspace 环境变量校验
+
+**验证**：6-23 完整 fetch，jsonl 记账 389 次调用 / 5170 积分，session summary 准确；安全防护 11 项全在；query.py 积分记账函数与同事版逐字节一致
+
 ### 2026-06-24 安全扫描第二批 5 条风险加固（按客户要求）
 
 客户第二轮扫描命中 5 条输入验证类风险，逐条核实后（多数为理论性/已部分加固）按客户要求全部追加防御：

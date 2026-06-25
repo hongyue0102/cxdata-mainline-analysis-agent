@@ -56,6 +56,11 @@ def _mask_phone(phone: str) -> str:
     return phone[:3] + "****" + phone[-4:]
 
 
+def _safe_net_error(e: Exception) -> str:
+    """网络异常脱敏（缓解异常消息泄露 url 含手机号/验证码）。只返回异常类型名。"""
+    return type(e).__name__
+
+
 # ── 命令：terms-check ─────────────────────────────────────────────────
 
 def cmd_terms_check():
@@ -137,7 +142,7 @@ def cmd_send_code(phone: str):
     except Exception as e:
         print(json.dumps({
             "code": "10500",
-            "msg": f"网络异常：{str(e)}",
+            "msg": f"网络异常：{_safe_net_error(e)}",
             "data": ""
         }, ensure_ascii=False))
 
@@ -191,6 +196,8 @@ def cmd_verify(phone: str, code: str):
             auth_data = get_cached_auth()
             auth_data.update({
                 "CXDA_USER_KEY": user_key,
+                "authtoken": "",
+                "authtoken_expire": "",
                 "phone_masked": phone_masked,
                 "authed_at": int(time.time())
             })
@@ -204,7 +211,7 @@ def cmd_verify(phone: str, code: str):
     except Exception as e:
         print(json.dumps({
             "code": "10500",
-            "msg": f"网络异常：{str(e)}",
+            "msg": f"网络异常：{_safe_net_error(e)}",
             "data": "",
         }, ensure_ascii=False))
 
