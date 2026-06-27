@@ -88,6 +88,26 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-26 安全扫描 5 条风险修复（攻击向量变体根治 + 同源补漏）
+
+前几轮修复暴露方法论问题：消除扫描器“看得见的写法”，但没堵“同一攻击向量的其他变体”。本轮针对变体绕过根治，并同步修复 stock agent 同源问题：
+
+| # | 风险 | 修复 |
+|---|---|---|
+| 1 | env RCE：放行 ../ 和绝对路径 | `common.py` 新增 `_safe_env_executable`：拒 `..`、必须绝对路径；CLI_PATH 限定 scripts 目录 + 文件名 `cxda_cache_cli.py` |
+| 2 | SSRF：未规范化 path | `http_get` path 校验加 `unquote`+`posixpath.normpath`，防 `/cxda/../admin` 和 `%2e%2e` 绕过 |
+| 3 | phone 走 GET 查询参数 | `auth.py` send-code 改 POST form data，phone 不进 query string（已验证后端支持 POST） |
+| 4 | code 走 GET 查询参数 | `auth.py` verify 改 POST form data |
+| 5 | parse_params 黑名单大小写敏感 | 黑名单全小写 + `k.lower()` 归一化比较，防 `Authtoken`/`USERKEY` 绕过 |
+
+**同源补漏（stock 反馈未报，但代码同源，一并修复避免下轮）**：
+- `cxda_cache_cli.py` 私域 write 改 0o600 权限 + `O_NOFOLLOW`（缓解默认 0o644 与 TOCTOU 符号链接替换）
+- `cxda_cache_cli.py` shared/private write 的 content 改 stdin 传递（不进命令行）；`common.py` 调用同步
+
+**改动文件**：`auth.py`、`common.py`、`query.py`、`cxda_cache_cli.py`
+
+**验证**：两 agent 全部语法通过；POST send-code 端到端正常（后端返回成功）；parse_params 5 变体拦截、env 拒 ../、SSRF 拒 ../admin、私域 write 0o600、符号链接 TOCTOU 拒绝、content stdin 读写往返 全部通过
+
 ### 2026-06-25 风险 1/4 终极加固：cred_crypto 改硬依赖，彻底消除“无加密分支”
 
 风险 1/4（缺 cryptography 则明文存储）此前用 `try/except ImportError` + `save_auth` 内 raise 拦截。但静态扫描器（如火山）若按模式匹配判定，看到 `except ImportError` 分支存在仍会报，不深入分析 raise 是否覆盖所有路径。为对“数据流分析”和“模式匹配”两种扫描规则都免疫，改为硬依赖：
