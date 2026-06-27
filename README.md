@@ -88,6 +88,12 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-27 0627 预演补漏 + 对照火山清单包体整洁
+
+**预演补漏**（0626 改完后做变体自测，主动发现并修复）：`CXDA_CACHE_PYTHON` 仍能指向任意可执行文件（`/tmp/evil.py`）。`_safe_env_executable` 新增 `name_pattern` 参数，`_get_python_exe` 要求文件名匹配 `^python(\d+(\.\d+)*)?$`——合法 python（系统/homebrew/venv）放行，`evil.py`/`sh`/`bash` 拒绝。
+
+**对照火山清单【1001 包体合规性】**：1 个历史报告样本（`A股市场主线识别报告-2026-06-08.md`）被 git 跟踪会进交付 zip。`git rm --cached` 移除（本地保留）+ `.gitignore` 扩大排除模式（`A股市场主线识别报告*.md`）。
+
 ### 2026-06-26 安全扫描 5 条风险修复（攻击向量变体根治 + 同源补漏）
 
 前几轮修复暴露方法论问题：消除扫描器“看得见的写法”，但没堵“同一攻击向量的其他变体”。本轮针对变体绕过根治，并同步修复 stock agent 同源问题：
