@@ -60,12 +60,14 @@ def _safe_env_path(name: str) -> str:
     return value
 
 
-def _safe_env_executable(name: str, trusted_dir: Path = None, trusted_name: str = None) -> str:
+def _safe_env_executable(name: str, trusted_dir: Path = None, trusted_name: str = None, name_pattern: str = None) -> str:
     """校验指向可执行文件的环境变量（缓解风险1：env RCE）。
 
     在 _safe_env_path 基础上额外要求：
     - 必须是绝对路径；
-    - 若指定 trusted_dir/trusted_name，则路径必须位于 trusted_dir 内且文件名匹配。
+    - 若指定 trusted_dir，则路径必须位于该目录内；
+    - 若指定 trusted_name，resolve 后文件名必须精确匹配；
+    - 若指定 name_pattern（正则），resolve 后文件名必须匹配（如 python 解释器）。
     不满足则视为未设置，回退默认值。
     """
     value = _safe_env_path(name)
@@ -74,14 +76,22 @@ def _safe_env_executable(name: str, trusted_dir: Path = None, trusted_name: str 
     p = Path(value)
     if not p.is_absolute():
         return ""
+    try:
+        # resolve 后必须仍是合法路径，拒绝符号链接/逃逸
+        resolved = p.resolve()
+    except (ValueError, OSError):
+        return ""
     if trusted_dir is not None:
         try:
-            # resolve 后必须仍在可信目录内，拒绝符号链接/逃逸
-            resolved = p.resolve()
             resolved.relative_to(trusted_dir.resolve())
         except (ValueError, OSError):
             return ""
-        if trusted_name is not None and resolved.name != trusted_name:
+    if trusted_name is not None and resolved.name != trusted_name:
+        return ""
+    if name_pattern is not None:
+        import re as _re_mod
+        if not _re_mod.match(name_pattern, resolved.name):
+            # 文件名不匹配可信模式（如非 python 解释器），拒绝指向任意可执行文件
             return ""
     return value
 
@@ -96,8 +106,8 @@ def _get_cli_path() -> Path:
 
 
 def _get_python_exe() -> str:
-    """获取 Python 执行路径（必须绝对路径，拒绝 ../）"""
-    env_python = _safe_env_executable("CXDA_CACHE_PYTHON")
+    """获取 Python 执行路径（必须绝对路径、文件名匹配 python*，拒绝指向任意可执行文件）"""
+    env_python = _safe_env_executable("CXDA_CACHE_PYTHON", name_pattern=r"^python(\d+(\.\d+)*)?$")
     if env_python:
         return env_python
     return sys.executable
