@@ -10,8 +10,9 @@ skills/*/scripts/.env
 skills/mainline-analysis/scripts/data/
 skills/mainline-analysis/scripts/data_backup_*/
 
-# 生成的报告
+# 生成的报告（所有历史/自动生成的报告样本，不进交付包，保持包体整洁）
 A股主线识别*.md
+A股市场主线识别报告*.md
 
 # macOS
 .DS_Store
