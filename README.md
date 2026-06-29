@@ -88,6 +88,17 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-29 路径遍历补漏：list_files / _get_skill_path 的 skill_name 校验
+
+火山扫描报出 `cxda_cache_cli.py` 两个此前未加固的方法：`list_files()` 和 `_get_skill_path()` 都未校验 `skill_name`，`../etc` 可列出/创建任意目录。此前只加固了 `_get_file_path`（read/write 入口），没往上追溯到同样接收 skill_name 的这两个方法——典型的"堵了 payload 没堵攻击向量"。
+
+- 新增类级 `_SAFE_NAME_RE` 白名单 + `_validate_skill_name()` 方法
+- `_get_skill_path`、`list_files`、`_get_file_path` 三个接收 skill_name 的入口统一调用校验
+- `list_files` 的 subdir 分支改为直接拼路径（列表操作不应 mkdir，消除副作用）
+- 三 agent（主线/股票/质地）同源同步修复
+
+**验证**：三 agent 语法通过；`_validate_skill_name` 覆盖三入口；8 个路径遍历变体（`../etc`/`..`/`a/b`/`..%2f`）全拦截，合法名不误伤
+
 ### 2026-06-27 0627 预演补漏 + 对照火山清单包体整洁
 
 **预演补漏**（0626 改完后做变体自测，主动发现并修复）：`CXDA_CACHE_PYTHON` 仍能指向任意可执行文件（`/tmp/evil.py`）。`_safe_env_executable` 新增 `name_pattern` 参数，`_get_python_exe` 要求文件名匹配 `^python(\d+(\.\d+)*)?$`——合法 python（系统/homebrew/venv）放行，`evil.py`/`sh`/`bash` 拒绝。
