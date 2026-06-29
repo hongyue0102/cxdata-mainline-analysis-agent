@@ -88,6 +88,17 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-06-29 硬编码凭证：cred_crypto 密钥派生退化检测
+
+火山扫描报出 `cred_crypto.py` 的 `_derive_key()`：当 `socket.gethostname()` 返回空且所有用户标识源（`getpass.getuser()`/`USER`/`USERNAME`）均为空时（典型容器环境），派生 material 退化成固定 `b"|"`，密钥可预测，攻击者可解密所有凭证。
+
+- `_derive_key()` 新增退化检测：host 与 user 均空时 `raise RuntimeError` 拒绝生成弱密钥，强制环境配置 hostname/user
+- 三 agent（主线/股票/质地）cred_crypto.py 同源同步修复
+
+**验证**：退化场景（host/user 全空）拒绝生成密钥；正常场景正常派生；加解密往返不受影响；换机器特征后老密文解不开（密钥仍正确绑定机器特征）
+
+**教训**：前几轮 checklist 偏重输入注入类，缺"依赖的外部数据源（gethostname/getuser）退化成弱状态"这一类，已补进 [[feedback_security_fix_methodology]] 的 checklist
+
 ### 2026-06-29 路径遍历补漏：list_files / _get_skill_path 的 skill_name 校验
 
 火山扫描报出 `cxda_cache_cli.py` 两个此前未加固的方法：`list_files()` 和 `_get_skill_path()` 都未校验 `skill_name`，`../etc` 可列出/创建任意目录。此前只加固了 `_get_file_path`（read/write 入口），没往上追溯到同样接收 skill_name 的这两个方法——典型的"堵了 payload 没堵攻击向量"。
