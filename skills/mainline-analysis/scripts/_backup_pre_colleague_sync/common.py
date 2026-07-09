@@ -14,10 +14,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Tuple
 
-# 凭证加解密（硬依赖，缓解风险1/4：杜绝任何“无加密执行”分支）。
-# 缺失 cryptography 库时直接 ImportError 终止，绝不退化到明文存储。
-# requirements.txt 已声明 cryptography，部署环境须 pip install。
-import cred_crypto
+# 凭证加解密（缓解风险2：CXDA_USER_KEY 明文存储）
+try:
+    import cred_crypto
+    _HAS_CRYPTO = True
+except ImportError:
+    _HAS_CRYPTO = False
 
 # ── Windows 编码修复 ──────────────────────────────────────────────────
 if sys.platform == "win32":
@@ -43,73 +45,61 @@ REQUEST_CHANNEL = "CAXEN"
 
 # ── CLI 缓存封装 ──────────────────────────────────────────────────────
 
-def _safe_env_path(name: str) -> str:
-    """读取并校验环境变量取值（缓解风险5：环境变量 RCE）。
+def _is_path_trusted(p: Path) -> bool:
+    """判断路径是否在可信区域（缓解风险2/3：环境变量指向恶意文件执行）。
 
-    拒绝 shell 元字符（; | & $ ` > < 换行等）、空字节，以及路径遍历序列（../）。
-    非法值视为未设置，回退默认值。
+    可信区域 = 脚本所在目录 或 用户家目录 或 Python 安装目录（系统 python）。
+    系统关键目录（/etc /bin 等）一律拒绝。这样即使环境变量被污染指向
+    任意 .py/可执行文件，也必须在可信区域内才采用，缩小攻击面。
     """
-    value = os.environ.get(name, "")
-    if not value:
-        return ""
-    if any(ch in value for ch in (";", "|", "&", "$", "`", ">", "<", "\n", "\r", "\0")):
-        return ""
-    # 拒绝路径遍历：含 .. 的取值一律拒绝（缓解风险1：绝对路径/相对逃逸指向恶意可执行文件）
-    if ".." in value:
-        return ""
-    return value
-
-
-def _safe_env_executable(name: str, trusted_dir: Path = None, trusted_name: str = None, name_pattern: str = None) -> str:
-    """校验指向可执行文件的环境变量（缓解风险1：env RCE）。
-
-    在 _safe_env_path 基础上额外要求：
-    - 必须是绝对路径；
-    - 若指定 trusted_dir，则路径必须位于该目录内；
-    - 若指定 trusted_name，resolve 后文件名必须精确匹配；
-    - 若指定 name_pattern（正则），resolve 后文件名必须匹配（如 python 解释器）。
-    不满足则视为未设置，回退默认值。
-    """
-    value = _safe_env_path(name)
-    if not value:
-        return ""
-    p = Path(value)
-    if not p.is_absolute():
-        return ""
+    SYSTEM_CRITICAL = (
+        "/etc", "/bin", "/sbin", "/boot", "/dev", "/proc", "/sys", "/var/tmp", "/tmp",
+    )
     try:
-        # resolve 后必须仍是合法路径，拒绝符号链接/逃逸
-        resolved = p.resolve()
-    except (ValueError, OSError):
-        return ""
-    if trusted_dir is not None:
-        try:
-            resolved.relative_to(trusted_dir.resolve())
-        except (ValueError, OSError):
-            return ""
-    if trusted_name is not None and resolved.name != trusted_name:
-        return ""
-    if name_pattern is not None:
-        import re as _re_mod
-        if not _re_mod.match(name_pattern, resolved.name):
-            # 文件名不匹配可信模式（如非 python 解释器），拒绝指向任意可执行文件
-            return ""
-    return value
+        resolved = str(p.resolve())
+    except Exception:
+        return False
+    # 拒绝系统关键目录及临时目录（防落地恶意文件）
+    for crit in SYSTEM_CRITICAL:
+        if resolved == crit or resolved.startswith(crit + os.sep):
+            return False
+    # 允许：脚本同目录、用户家目录、Python 标准目录（sys.executable 所在）
+    script_dir = str(Path(__file__).resolve().parent)
+    home = str(Path.home().resolve())
+    py_dir = str(Path(sys.executable).resolve().parent)
+    return (resolved.startswith(script_dir + os.sep) or resolved == script_dir
+            or resolved.startswith(home + os.sep)
+            or resolved.startswith(py_dir + os.sep) or resolved == py_dir)
 
 
 def _get_cli_path() -> Path:
-    """获取 cxda_cache_cli.py 路径（本地优先，限定在 scripts 目录内）"""
-    scripts_dir = Path(__file__).parent
-    env_path = _safe_env_executable("CXDA_CACHE_CLI_PATH", trusted_dir=scripts_dir, trusted_name="cxda_cache_cli.py")
+    """获取 cxda_cache_cli.py 路径（本地优先）。
+
+    环境变量 CXDA_CACHE_CLI_PATH 仅在指向真实存在的 .py 文件、且位于可信区域时才采用，
+    否则回退到同目录默认值（缓解风险2：环境变量被污染指向恶意脚本执行 RCE）。
+    """
+    env_path = os.environ.get("CXDA_CACHE_CLI_PATH")
     if env_path:
-        return Path(env_path)
-    return scripts_dir / "cxda_cache_cli.py"
+        p = Path(env_path)
+        # 校验：存在 + .py 文件 + 可信区域（三层）
+        if p.is_file() and p.suffix == ".py" and _is_path_trusted(p):
+            return p
+        # 校验失败回退默认，避免环境变量污染导致执行任意脚本
+    return Path(__file__).parent / "cxda_cache_cli.py"
 
 
 def _get_python_exe() -> str:
-    """获取 Python 执行路径（必须绝对路径、文件名匹配 python*，拒绝指向任意可执行文件）"""
-    env_python = _safe_env_executable("CXDA_CACHE_PYTHON", name_pattern=r"^python(\d+(\.\d+)*)?$")
+    """获取 Python 执行路径。
+
+    环境变量 CXDA_CACHE_PYTHON 仅在指向真实存在、可执行、且位于可信区域的文件时才采用，
+    否则回退到当前解释器（缓解风险3：环境变量被污染指向恶意程序执行 RCE）。
+    """
+    env_python = os.environ.get("CXDA_CACHE_PYTHON")
     if env_python:
-        return env_python
+        p = Path(env_python)
+        if p.is_file() and os.access(p, os.X_OK) and _is_path_trusted(p):
+            return env_python
+        # 校验失败回退默认，避免执行任意程序
     return sys.executable
 
 
@@ -122,15 +112,15 @@ def _get_workspace() -> str:
     2. CLAUDE_WORKSPACE 环境变量
     3. 默认 ~/.cxda-cache
     """
-    workspace = _safe_env_path("CXDA_CACHE_WORKSPACE") \
-        or _safe_env_path("CLAUDE_WORKSPACE") \
+    workspace = os.environ.get("CXDA_CACHE_WORKSPACE") \
+        or os.environ.get("CLAUDE_WORKSPACE") \
         or str(Path.home() / ".cxda-cache")
 
     Path(workspace).mkdir(parents=True, exist_ok=True)
     return workspace
 
 
-def _cli_call(command: str, subcommand: str = None, args: list = None, raw_output: bool = False, stdin_input: str = None) -> dict:
+def _cli_call(command: str, subcommand: str = None, args: list = None, raw_output: bool = False) -> dict:
     """
     调用 cxda_cache_cli.py CLI
 
@@ -139,14 +129,9 @@ def _cli_call(command: str, subcommand: str = None, args: list = None, raw_outpu
         subcommand: 子命令（get, set, read, write 等）
         args: 额外参数列表
         raw_output: 是否返回原始输出
-        stdin_input: 通过 stdin 传入的内容（用于传敏感数据，避免出现在进程列表，缓解风险2）
 
     Returns:
         CLI 返回的 JSON 字典
-
-    安全（缓解风险3）：异常时不把完整 cmd（可能含敏感参数）放入 error，只返回脱敏的类型信息。
-    安全（缓解火山风险1+2）：环境变量白名单传递，只传子进程必需变量，
-    拒绝 PYTHONPATH/PYTHONHOME/LD_PRELOAD 等危险变量和敏感变量泄露给子进程。
     """
     args = args or []
     cmd = [_get_python_exe(), str(_get_cli_path()), command]
@@ -154,37 +139,11 @@ def _cli_call(command: str, subcommand: str = None, args: list = None, raw_outpu
         cmd.append(subcommand)
     cmd.extend(args)
 
-    # 环境变量白名单：只传子进程必需变量，阻断 PYTHONPATH/LD_PRELOAD 等 RCE 向量，
-    # 同时避免 AWS_*、DATABASE_URL 等敏感变量泄露给子进程（火山风险1+2）
-    _ENV_WHITELIST_PREFIXES = (
-        "PATH", "HOME", "USER", "USERNAME", "LOGNAME", "LANG", "LC_",
-        "TERM", "TMPDIR", "TEMP", "TMP", "SHELL", "PWD",
-        "CXDA_CACHE_", "CLAUDE_WORKSPACE",
-        "HOSTNAME", "HOST",
-    )
-    _ENV_BLACKLIST_EXACT = {
-        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT",
-        "PYTHONDEBUG", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE",
-        "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH", "LD_DEBUG",
-    }
-    env = {}
-    for k, v in os.environ.items():
-        if k in _ENV_BLACKLIST_EXACT:
-            continue
-        if any(k.startswith(prefix) for prefix in _ENV_WHITELIST_PREFIXES):
-            env[k] = v
+    env = os.environ.copy()
     env.setdefault("CXDA_CACHE_WORKSPACE", _get_workspace())
 
     try:
-        result = subprocess.run(
-            cmd,
-            input=stdin_input,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
         stdout = result.stdout.strip() if result.stdout else ""
 
         if raw_output:
@@ -196,13 +155,8 @@ def _cli_call(command: str, subcommand: str = None, args: list = None, raw_outpu
             except json.JSONDecodeError:
                 return {"success": True, "content": stdout}
         return {"success": False, "error": "Empty output"}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "CLI 调用超时"}
-    except FileNotFoundError:
-        return {"success": False, "error": "CLI 可执行文件不存在"}
     except Exception as e:
-        # 脱敏：不返回可能含敏感参数的完整命令行，只返回异常类型名（缓解风险3）
-        return {"success": False, "error": "CLI 调用失败：{}".format(type(e).__name__)}
+        return {"success": False, "error": str(e)}
 
 
 # ── 认证数据读写 ──────────────────────────────────────────────────────
@@ -240,26 +194,29 @@ def check_terms_accepted() -> Tuple[bool, dict]:
 def save_auth(data: dict):
     """保存认证数据到缓存（合并更新）。
 
-    CXDA_USER_KEY 落盘前统一加密（缓解风险1/4：明文存储），所有调用方无需各自处理。
-    安全：数据通过 stdin 传给 CLI，不作为命令行参数，避免出现在进程列表（缓解风险2）。
-    cred_crypto 为硬依赖（顶部 import），不存在无加密分支。
+    CXDA_USER_KEY 在落盘前统一加密（缓解风险2），所有调用方（cmd_verify、
+    set_user_key 等）无需各自处理。已加密形态（带前缀）不重复加密。
     """
-    if isinstance(data, dict) and data.get("CXDA_USER_KEY"):
+    if _HAS_CRYPTO and isinstance(data, dict) and data.get("CXDA_USER_KEY"):
         key = data["CXDA_USER_KEY"]
         if not cred_crypto.is_encrypted(key):
             data = {**data, "CXDA_USER_KEY": cred_crypto.encrypt(key)}
-    _cli_call("auth", "set", stdin_input=json.dumps(data, ensure_ascii=False))
+    _cli_call("auth", "set", ["--data", json.dumps(data, ensure_ascii=False)])
 
 
 # ── 公域 JSON 文件读写（跨 Skill 共享，如会话账本） ──────────────────────
 
 import re as _re
-# filename 只允许 字母/数字/下划线/连字符/点（缓解路径遍历）
+# filename 只允许 字母/数字/下划线/连字符/点，禁止路径分隔符和 ..（缓解风险5 路径遍历）
 _SHARED_FILENAME_RE = _re.compile(r'^[A-Za-z0-9_.\-]+$')
 
 
 def _validate_shared_filename(filename: str) -> str:
-    """校验公域文件名格式（缓解路径遍历）。CLI 侧已有防护，此处入口层双保险。"""
+    """校验公域文件名格式（缓解风险5：路径遍历）。
+
+    只允许字母/数字/下划线/连字符/点，拒绝含 / \\ .. 等路径成分的文件名。
+    CLI 侧 _safe_join 已有 resolve()+起始目录校验作兜底，此处为入口层防御。
+    """
     if not isinstance(filename, str) or not filename or not _SHARED_FILENAME_RE.match(filename):
         raise ValueError(f"非法公域文件名（仅允许字母数字下划线连字符点）: {filename!r}")
     return filename
@@ -284,41 +241,7 @@ def get_shared_json(filename: str) -> dict:
 def save_shared_json(filename: str, data: dict):
     """写入公域 JSON 文件（覆盖写）"""
     filename = _validate_shared_filename(filename)
-    _cli_call("shared", "write", [filename], stdin_input=json.dumps(data, ensure_ascii=False))
-
-
-def get_shared_text(filename: str) -> str:
-    """
-    读取公域文本文件，文件不存在时返回空字符串。
-
-    JSONL 只有单行时会被普通 _cli_call 当作 JSON 解析，因此这里使用 raw_output。
-    """
-    filename = _validate_shared_filename(filename)
-    result = _cli_call("shared", "read", [filename], raw_output=True)
-    if not isinstance(result, dict):
-        return ""
-
-    content = result.get("content") or ""
-    if content:
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, dict) and parsed.get("success") is False and "error" in parsed:
-                return ""
-        except json.JSONDecodeError:
-            pass
-    return content
-
-
-def save_shared_text(filename: str, content: str):
-    """写入公域文本文件（覆盖写）。内容经 stdin 传，不进命令行。"""
-    filename = _validate_shared_filename(filename)
-    _cli_call("shared", "write", [filename], stdin_input=content)
-
-
-def append_shared_text(filename: str, content: str):
-    """追加写入公域文本文件。内容经 stdin 传，不进命令行。"""
-    filename = _validate_shared_filename(filename)
-    _cli_call("shared", "append", [filename], stdin_input=content)
+    _cli_call("shared", "write", [filename, "--content", json.dumps(data, ensure_ascii=False)])
 
 
 # ── CXDA_USER_KEY 管理 ───────────────────────────────────────────────
@@ -329,7 +252,10 @@ def get_user_key() -> str:
 
     优先级：
     1. 环境变量 CXDA_USER_KEY
-    2. 缓存中的 CXDA_USER_KEY（加密存储，读取时透明解密；老明文自动迁移）
+    2. 缓存中的 CXDA_USER_KEY（加密存储，读取时解密）
+
+    缓存中的 CXDA_USER_KEY 以 Fernet 密文存储（缓解风险2），
+    读取时透明解密；若为老明文数据，解密后顺带迁移为密文。
     """
     env_key = os.environ.get("CXDA_USER_KEY")
     if env_key:
@@ -339,8 +265,12 @@ def get_user_key() -> str:
     stored = auth.get("CXDA_USER_KEY", "")
     if not stored:
         return ""
+    if not _HAS_CRYPTO:
+        # 无加密库时退化为明文（仅靠风险6的文件权限防护）
+        return stored
     plaintext, needs_migration = cred_crypto.decrypt(stored)
     if needs_migration and plaintext:
+        # 老明文数据：重新加密写回，完成迁移
         try:
             set_user_key(plaintext)
         except Exception:
@@ -356,7 +286,7 @@ def mask_user_key(key: str) -> str:
 
 
 def set_user_key(key: str):
-    """将 CXDA_USER_KEY 写入缓存"""
+    """将 CXDA_USER_KEY 写入缓存（加密由 save_auth 统一处理，缓解风险2）"""
     save_auth({"CXDA_USER_KEY": key})
 
 
@@ -459,36 +389,20 @@ def http_get(url: str, params: dict = None, include_channel: bool = True) -> dic
     Returns:
         解析后的 JSON 数据字典
 
-    安全（缓解风险6 SSRF）：校验 url 的 scheme/host/path，只允许官方域名且 path
-    必须以 BASE_URL 的 path 前缀开头（/cxda/），拒绝跨 path 访问（如 /cxdaevil/）。
+    安全（缓解风险4 SSRF）：url 必须以 BASE_URL 开头（白名单），拒绝任何其他 host，
+    防止外部输入把请求导向内部服务或任意地址。
     """
     import requests
-    from urllib.parse import urlparse, unquote
-    import posixpath
 
-    # SSRF 防护：scheme/host/path 三重校验 + path 规范化，防止 /cxda/../admin 绕过（缓解风险2/6）
-    base = urlparse(BASE_URL)
-    parsed = urlparse(url) if isinstance(url, str) else None
-    # 先解码 URL 编码（防 %2e%2e 绕过），再规范化 path，消除 ../ 、// 等逃逸序列
-    norm_path = posixpath.normpath(unquote(parsed.path)) if parsed else ""
-    if (
-        not parsed
-        or parsed.scheme != base.scheme
-        or parsed.netloc != base.netloc
-        or not norm_path.startswith(base.path + "/")
-    ):
-        # 脱敏：不回显完整 url（可能含敏感参数，缓解风险7）
-        raise ValueError("拒绝非白名单 URL 请求（仅允许官方 cxdata 接口路径）")
+    # SSRF 防护：只允许请求 BASE_URL（官方 cxdata 域名），拒绝其他
+    if not isinstance(url, str) or not url.startswith(BASE_URL):
+        raise ValueError(f"拒绝非白名单 URL 请求（仅允许 {BASE_URL}）: {url!r}")
 
     params = dict(params or {})
     if include_channel and REQUEST_CHANNEL:
         params["requestChannel"] = REQUEST_CHANNEL
 
-    try:
-        resp = requests.get(url, params=params, headers=HEADERS, proxies=PROXIES, timeout=30)
-    except Exception:
-        # 脱敏：不抛含 url 的原始异常（缓解风险7）
-        raise RuntimeError("网络请求失败")
+    resp = requests.get(url, params=params, headers=HEADERS, proxies=PROXIES)
 
     # 尝试 gzip + base64 解码
     try:
@@ -496,10 +410,7 @@ def http_get(url: str, params: dict = None, include_channel: bool = True) -> dic
         return data
     except Exception:
         # 非 gzip 数据，直接 JSON 解析
-        try:
-            return json.loads(resp.text)
-        except Exception:
-            raise RuntimeError("响应解析失败")
+        return json.loads(resp.text)
 
 
 # ── 输出工具 ──────────────────────────────────────────────────────────

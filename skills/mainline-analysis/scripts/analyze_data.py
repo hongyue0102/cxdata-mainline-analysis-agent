@@ -29,6 +29,13 @@ def safe_float(val, default=0.0):
         return default
 
 
+def safe_int(val, default=0):
+    """安全转整数（缓解火山风险4：审计日志缺失/类型校验缺失）。
+    JSON 被篡改为字符串时 TypeError 崩溃，统一兜底为 default。
+    """
+    return int(safe_float(val, default))
+
+
 def _get_board(code):
     """根据股票代码返回板块: bse(北交所) / gem(创业板) / star(科创板) / main(主板)"""
     if not code:
@@ -71,9 +78,9 @@ def analyze_market_environment(heat, industry_quotes, meta):
     hot_comment = h.get("HOT_INDEX_COS", "")
     hot_index = safe_float(h.get("HOT_INDEX"))
 
-    total_stocks = meta.get("total_stocks", 0)
-    limit_up = meta.get("limit_up_count", 0)
-    limit_down = meta.get("limit_down_count", 0)
+    total_stocks = safe_int(meta.get("total_stocks", 0))
+    limit_up = safe_int(meta.get("limit_up_count", 0))
+    limit_down = safe_int(meta.get("limit_down_count", 0))
 
     # 行业涨跌分布
     rising_industries = [i for i in industry_quotes if safe_float(i.get("INDU_LIMIT_DAY")) > 0]
@@ -295,8 +302,8 @@ def analyze_anchor_stocks(limit_up_full, stock_value, limit_up_count,
 
 def analyze_emotion_cycle(meta, market_heat):
     """第四步：判断当前情绪（三维加权：广度40%+强度35%+量能25%）"""
-    limit_up = meta.get("limit_up_count", 0)
-    limit_down = meta.get("limit_down_count", 0)
+    limit_up = safe_int(meta.get("limit_up_count", 0))
+    limit_down = safe_int(meta.get("limit_down_count", 0))
 
     h = market_heat[0] if market_heat else {}
     up_ratio = safe_float(h.get("UP_NUM_PER"))
@@ -347,8 +354,8 @@ def analyze_emotion_cycle(meta, market_heat):
     #   炸板 broken = 盘中触及涨停但收盘未封（全市场行情反推，见 fetch_data.is_broken）
     # 这两个数都来自全市场行情，与涨幅榜前 N 无关，避免旧版 103 vs 61 不一致。
     # 数据由 fetch_data 计算后写入 meta；旧数据无 sealed_count/broken_count 时回退。
-    sealed = meta.get("sealed_count", meta.get("limit_up_count", 0))
-    broken = meta.get("broken_count", 0)
+    sealed = safe_int(meta.get("sealed_count", meta.get("limit_up_count", 0)))
+    broken = safe_int(meta.get("broken_count", 0))
     total_touched = sealed + broken  # 今天所有触过涨停板的股票
     broken_rate = round(broken / total_touched * 100, 1) if total_touched > 0 else 0
 
@@ -610,13 +617,13 @@ def main():
     # === 数据一致性自检（防止旧版『涨停103 vs 封板61』不一致再次发生）===
     # meta.limit_up_count 是 fetch 阶段全市场统计的涨停数；
     # limit_up_full 是写盘的全集。两者必须一致，否则下游主线/锚点/情绪全部偏。
-    meta_lu = meta.get("limit_up_count")
+    meta_lu = safe_int(meta.get("limit_up_count"))
     if meta_lu is not None and len(limit_up_full) != meta_lu:
         print(f"  [WARN][一致性] 涨停股全集 {len(limit_up_full)} 家 ≠ meta.limit_up_count {meta_lu} 家，"
               f"可能 fetch 取数不全或 data/ 目录陈旧，建议重新运行 fetch_data.py")
     # 封板+炸板应 ≥ 涨停数（封板就是涨停的子集，炸板是额外触板的）
-    sealed = meta.get("sealed_count", meta.get("limit_up_count", 0))
-    broken = meta.get("broken_count", 0)
+    sealed = safe_int(meta.get("sealed_count", meta.get("limit_up_count", 0)))
+    broken = safe_int(meta.get("broken_count", 0))
     if sealed and sealed + broken < sealed:
         print(f"  [WARN][一致性] 封板 {sealed} + 炸板 {broken} < 封板数本身，meta 数据异常")
 
@@ -632,7 +639,7 @@ def main():
     # 传递 L2 标准名清单给锚点分析，确保行业匹配跟主线识别一致
     l2_std_set = set(ind.get("INDU_CLASS_NAME", "") for ind in (industry_l2_quotes or industry_quotes)
                      if ind.get("INDU_CLASS_NAME"))
-    anchors = analyze_anchor_stocks(limit_up_full, stock_value, meta.get("limit_up_count", 0),
+    anchors = analyze_anchor_stocks(limit_up_full, stock_value, safe_int(meta.get("limit_up_count", 0)),
                                     main_line_names=main_line_names, stock_detail=stock_detail,
                                     l2_standard_names=l2_std_set)
 

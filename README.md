@@ -88,6 +88,21 @@ cxdata-mainline-analysis-agent/
 
 ## 变更历史
 
+### 2026-07-09 火山安全扫描 4 条风险修复
+
+| # | 风险 | 修复 |
+|---|---|---|
+| 1 | `_cli_call` 环境变量全量传递导致 RCE（PYTHONPATH/LD_PRELOAD）| `common.py` `_cli_call` 改为环境变量白名单传递，只传 PATH/HOME/USER/LANG/CXDA_CACHE_* 等必需变量，黑名单拦截 PYTHONPATH/PYTHONHOME/LD_PRELOAD/LD_LIBRARY_PATH/DYLD_* 等 |
+| 2 | `_cli_call` 子进程继承敏感环境变量（AWS_*/DATABASE_URL 等）| 同风险1 白名单方案，非白名单变量一律不传 |
+| 3 | `cred_crypto` 密钥仅由 hostname+username 派生，易被离线破解 | `cred_crypto.py` 新增 `_get_machine_id()`（macOS IOPlatformUUID / Linux machine-id / Windows MachineGuid），密钥派生材料加入 machine-id，增加攻击者获取密钥材料难度 |
+| 4 | `analyze_data.py` meta 字段缺类型校验，恶意 JSON 导致 TypeError 崩溃 | 新增 `safe_int()` 函数，所有 meta 数值字段（limit_up_count/limit_down_count/total_stocks/sealed_count/broken_count）统一经 `safe_int()` 转换 |
+
+**改动文件**：`common.py`、`cred_crypto.py`、`analyze_data.py`（主线 agent）；`common.py`、`cred_crypto.py`（股票 agent 同步）
+
+**验证**：5 文件语法编译通过；风险1+2（白名单放行+黑名单拦截+敏感变量阻断）、风险3（machine-id 获取+加解密往返+派生材料验证）、风险4（safe_int 基础+正常值+恶意值不崩溃）全部通过
+
+**注意**：风险3 修改了密钥派生材料（新增 machine-id），升级后旧密文将无法解密（换机器/升级后需重新鉴权一次，与此前 host/user 变化行为一致）
+
 ### 2026-06-29 硬编码凭证：cred_crypto 密钥派生退化检测
 
 火山扫描报出 `cred_crypto.py` 的 `_derive_key()`：当 `socket.gethostname()` 返回空且所有用户标识源（`getpass.getuser()`/`USER`/`USERNAME`）均为空时（典型容器环境），派生 material 退化成固定 `b"|"`，密钥可预测，攻击者可解密所有凭证。
